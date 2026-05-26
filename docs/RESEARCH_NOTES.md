@@ -62,6 +62,8 @@ For 14B T2V:
 
 The app should support external model libraries through `extra_model_paths.yaml`, because model files are huge and should not live inside this repo.
 
+For GGUF variants through `ComfyUI-GGUF`, the loader uses `UnetLoaderGGUF` and a separate `unet_gguf` model list. In this project, `models/unet` is included under the `diffusion_models` extra path so the GGUF node can derive its `unet_gguf` list from the same configured model roots.
+
 ## Turbo / Distillation Findings
 
 LightX2V provides WAN 2.2 distilled models and LoRAs:
@@ -111,4 +113,3 @@ LTX uses a different capability surface from WAN:
 - LTX-2.3 dimensions must be divisible by 32; frame counts must follow the 8n+1 pattern.
 
 App implication: do not bake WAN assumptions into the UI model. Use a provider adapter with shared fields where possible and model-specific settings where necessary.
-

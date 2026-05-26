@@ -198,6 +198,25 @@ App implication:
 - If using V89 presets directly, we need SwarmUI ExtraNodes and potentially RIFE/frame interpolation nodes.
 - For LTX 2.3, the Lightricks ComfyUI-LTXVideo nodes are likely necessary for advanced audio/video workflows.
 
+## Local Model Library
+
+Local WAN/LTX assets have been copied into:
+
+```text
+D:\VIDEO_GENS\wan-ltx-video-studio\models
+```
+
+See `docs/LOCAL_MODEL_LIBRARY.md` for the full inventory.
+
+Summary:
+
+- 24 relevant WAN/LTX files copied from `D:\IMAGE_GENERATORS\Comfy_UI_Furkan_V61\ComfyUI\models`.
+- Total copied size: about 190.336 GB.
+- Comfy extra model path config added at `config/comfy_extra_model_paths.yaml`.
+- WAN 2.2 TI2V 5B, WAN 2.2 A14B FP8 high/low experts, WAN 2.2 Lightning LoRAs, and key LTX 2.3 files are present locally.
+- ComfyUI-GGUF exposes the four WAN A14B Q8 files through `/models/unet_gguf` and `UnetLoaderGGUF`.
+- The copied LTX `.gguf` checkpoint is present on disk but not visible through `/models/checkpoints`; validate it later with the LTX adapter path.
+
 ## Current Runtime Ranking
 
 1. `comfyui-sec-v89`: best optimized Comfy candidate because SageAttention/FlashAttention/xFormers/Triton import and Comfy starts with Sage Attention on RTX 5090.
@@ -206,7 +225,7 @@ App implication:
 
 ## Next Bake-Off Step
 
-Download or locate WAN 2.2 weights, then run a minimal real generation in:
+Run a minimal real generation with the local WAN 2.2 TI2V 5B safetensors in:
 
 1. `comfyui-sec-v89` with Sage Attention.
 2. `comfyui` clean runtime.

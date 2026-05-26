@@ -1,0 +1,17 @@
+wan_ltx_video_studio:
+  base_path: D:/VIDEO_GENS/wan-ltx-video-studio
+  checkpoints: models/checkpoints
+  text_encoders: |
+    models/text_encoders
+    models/clip
+  clip_vision: models/clip_vision
+  diffusion_models: |
+    models/diffusion_models
+    models/unet
+  loras: models/loras
+  vae: models/vae
+  latent_upscale_models: models/latent_upscale_models
+  upscale_models: models/upscale_models
+  audio_encoders: models/audio_encoders
+  model_patches: models/model_patches
+
