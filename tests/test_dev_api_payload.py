@@ -1,6 +1,6 @@
 import unittest
 
-from wan_ltx_studio.server.dev_api import _plan_to_payload, _request_from_payload
+from wan_ltx_studio.server.dev_api import _plan_to_payload, _profiles_to_payload, _request_from_payload
 from wan_ltx_studio.planning import plan_chunked_video
 
 
@@ -36,6 +36,27 @@ class DevApiPayloadTests(unittest.TestCase):
         self.assertEqual(response["engine"]["baseModel"], "wan22_i2v_a14b_fp8_original")
         self.assertEqual(response["engine"]["loras"][0]["role"], "workflow")
         self.assertEqual(response["segments"][1]["continuity"]["source"], "previous_segment")
+
+    def test_profiles_payload_exposes_render_backend_policy(self):
+        response = _profiles_to_payload()
+        profiles = {profile["id"]: profile for profile in response["profiles"]}
+        profile = profiles["wan22_i2v_a14b_fp8_lightning_workflow"]
+
+        self.assertEqual(profile["sampleSteps"], 4)
+        self.assertEqual(profile["vramPolicy"]["targetGb"], 25.0)
+        self.assertEqual(len(profile["builtInLoras"]), 2)
+
+    def test_optional_array_fields_can_be_omitted(self):
+        request = _request_from_payload(
+            {
+                "width": 1280,
+                "height": 720,
+                "totalSeconds": 5,
+            }
+        )
+
+        self.assertEqual(request.segment_prompts, ())
+        self.assertEqual(request.loras, ())
 
 
 if __name__ == "__main__":

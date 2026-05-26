@@ -266,7 +266,7 @@ Generate screen structure:
 
 ### Phase 3: Render Server
 
-- Add render job model.
+- Add render profile and render job planning model. Initial GPU-safe slice is documented in `docs/DIRECT_RENDERER_BACKEND.md`.
 - Add queue and cancellation.
 - Add progress event stream.
 - Render one WAN segment from a `SegmentPlan`.

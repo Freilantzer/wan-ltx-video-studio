@@ -13,6 +13,12 @@ from wan_ltx_studio.planning import (
     VideoRequest,
     plan_chunked_video,
 )
+from wan_ltx_studio.rendering import (
+    RenderingError,
+    build_render_job_plan,
+    list_renderer_profiles,
+    render_job_plan_to_payload,
+)
 
 
 class StudioApiHandler(BaseHTTPRequestHandler):
@@ -25,9 +31,12 @@ class StudioApiHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "name": "WAN/LTX Video Studio",
                     "version": __version__,
-                    "engine": "planner-only",
+                    "engine": "direct-render-planning",
                 }
             )
+            return
+        if self.path == "/api/render/profiles":
+            self._send_json(_profiles_to_payload())
             return
 
         self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
@@ -35,6 +44,9 @@ class StudioApiHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if self.path == "/api/plan":
             self._handle_plan()
+            return
+        if self.path == "/api/render/plan":
+            self._handle_render_plan()
             return
 
         self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
@@ -52,6 +64,21 @@ class StudioApiHandler(BaseHTTPRequestHandler):
             return
 
         self._send_json(_plan_to_payload(plan))
+
+    def _handle_render_plan(self) -> None:
+        try:
+            payload = self._read_json()
+            request = _request_from_payload(payload)
+            job = build_render_job_plan(
+                request,
+                model_root=_optional_str(payload, "modelRoot"),
+                runtime_root=_str(payload, "runtimeRoot", "runtimes/direct-wan/src/Wan2.2"),
+            )
+        except (json.JSONDecodeError, TypeError, ValueError, PlanningError, RenderingError) as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        self._send_json(render_job_plan_to_payload(job))
 
     def _read_json(self) -> dict[str, Any]:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -151,6 +178,38 @@ def _plan_to_payload(plan: Any) -> dict[str, Any]:
     }
 
 
+def _profiles_to_payload() -> dict[str, Any]:
+    return {
+        "profiles": [
+            {
+                "id": profile.id,
+                "label": profile.label,
+                "family": profile.family,
+                "task": profile.task,
+                "checkpointFormat": profile.checkpoint_format,
+                "sampleSteps": profile.sample_steps,
+                "sampleShift": profile.sample_shift,
+                "sampleGuideScale": profile.sample_guide_scale,
+                "fps": profile.fps,
+                "vramPolicy": {
+                    "targetGb": profile.vram_policy.target_gb,
+                    "warnGb": profile.vram_policy.warn_gb,
+                    "unsafeGb": profile.vram_policy.unsafe_gb,
+                },
+                "builtInLoras": [
+                    {
+                        "role": component.role,
+                        "relativePath": component.relative_path,
+                        "dtype": component.dtype,
+                    }
+                    for component in profile.built_in_loras
+                ],
+            }
+            for profile in list_renderer_profiles()
+        ]
+    }
+
+
 def _int(payload: dict[str, Any], key: str, default: int) -> int:
     value = payload.get(key, default)
     return int(value)
@@ -183,7 +242,7 @@ def _optional_str(payload: dict[str, Any], key: str) -> str | None:
 
 
 def _segment_prompts(payload: dict[str, Any]) -> tuple[str, ...]:
-    value = payload.get("segmentPrompts", ())
+    value = payload.get("segmentPrompts")
     if value in (None, ""):
         return ()
     if not isinstance(value, list):
@@ -192,7 +251,7 @@ def _segment_prompts(payload: dict[str, Any]) -> tuple[str, ...]:
 
 
 def _loras(payload: dict[str, Any]) -> tuple[LoraSelection, ...]:
-    value = payload.get("loras", ())
+    value = payload.get("loras")
     if value in (None, ""):
         return ()
     if not isinstance(value, list):
