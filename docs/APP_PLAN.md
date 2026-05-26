@@ -19,7 +19,7 @@ The default performance target is the owner's local Windows machine:
 - Python installs available: 3.10, 3.11, 3.12, 3.13
 - Node: 24.11.1
 
-This means the first-class target is not an 8 GB or 12 GB fallback profile. The app should default to high-performance WAN 2.2 workflows suitable for a 32 GB Blackwell card, while still offering lower-memory modes later.
+This means the first-class target is not an 8 GB or 12 GB fallback profile. The app should default to high-performance WAN 2.2 workflows suitable for a 32 GB Blackwell card, while still offering lower-memory modes later. For 720p WAN 2.2 A14B I2V, the first direct renderer target is about 25 GB peak VRAM, based on the user's proven workflow.
 
 ## Design Principles
 
@@ -161,6 +161,7 @@ ComfyUI's `PainterLongVideo`, SageAttention patching, and video helper behavior 
 
 - Default profile for the RTX 5090 target machine.
 - For 32 GB VRAM and known-good model placement.
+- 720p A14B I2V target: about 25 GB peak VRAM, with a warning above 28 GB.
 - Prefer keeping reusable model components resident between segments.
 - Avoid repeated unload/reload within one render job.
 - Prioritize WAN 2.2 14B FP8/distilled workflows when installed.

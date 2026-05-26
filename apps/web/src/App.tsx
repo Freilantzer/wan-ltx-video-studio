@@ -90,6 +90,7 @@ const modelProfiles = [
     note: "Original",
     family: "WAN 2.2",
     includesLightning: false,
+    targetVramGb: 25,
   },
   {
     id: "wan22_i2v_a14b_fp8_lightning_workflow",
@@ -97,6 +98,7 @@ const modelProfiles = [
     note: "Workflow",
     family: "WAN 2.2",
     includesLightning: true,
+    targetVramGb: 25,
   },
   {
     id: "wan22_ti2v_5b_fp16",
@@ -104,6 +106,7 @@ const modelProfiles = [
     note: "5B",
     family: "WAN 2.2",
     includesLightning: false,
+    targetVramGb: 16,
   },
   {
     id: "wan22_i2v_a14b_q8_gguf",
@@ -111,6 +114,7 @@ const modelProfiles = [
     note: "GGUF",
     family: "WAN 2.2",
     includesLightning: false,
+    targetVramGb: 22,
   },
   {
     id: "ltx23_dev_distilled",
@@ -118,6 +122,7 @@ const modelProfiles = [
     note: "LTX",
     family: "LTX",
     includesLightning: false,
+    targetVramGb: 24,
   },
 ];
 
@@ -396,6 +401,7 @@ export function App() {
           </label>
           <div className="model-chip-row">
             <span className="model-chip">{activeModel.note}</span>
+            <span className="model-chip">720p target ~{activeModel.targetVramGb} GB VRAM</span>
             {activeModel.includesLightning ? <span className="model-chip">Lightning in workflow</span> : null}
           </div>
           <div className="field-grid">
@@ -507,7 +513,7 @@ export function App() {
             <Metric label="Target" value={plan ? `${plan.targetTimelineFrames} f` : "-"} />
             <Metric label="Chunk" value={plan ? `${plan.requestedChunkFrames} f` : "-"} />
             <Metric label="Total" value={formatSeconds(totalSeconds)} />
-            <Metric label="Status" value={isLoading ? "Planning" : "Ready"} />
+            <Metric label="VRAM" value={`~${activeModel.targetVramGb} GB`} />
           </div>
           <div className="button-row">
             <button className="secondary-button" title="Save preset">

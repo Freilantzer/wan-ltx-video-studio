@@ -18,6 +18,7 @@ The goal is not to recreate a node graph UI. The app should expose a focused, po
 - [App plan](docs/APP_PLAN.md)
 - [Architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
 - [Chunked video planner](docs/CHUNKED_VIDEO_PLANNER.md)
+- [VRAM targets](docs/VRAM_TARGETS.md)
 - [Research notes](docs/RESEARCH_NOTES.md)
 - [Reference workflow analysis](docs/REFERENCE_WORKFLOW_ANALYSIS.md)
 - [Read-only Comfy reference install](docs/READ_ONLY_COMFY_REFERENCE_INSTALL.md)
