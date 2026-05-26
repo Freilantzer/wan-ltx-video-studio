@@ -64,7 +64,9 @@ models/latent_upscale_models/ltx-2.3-spatial-upscaler-x2-1.1.safetensors
 models/checkpoints/LTX-2.3-distilled-Q6_K.gguf
 ```
 
-## ComfyUI Visibility
+## ComfyUI Visibility Reference
+
+This section is retained only to document how the copied model files appeared to ComfyUI during research. The app should not require ComfyUI folder structure or launch ComfyUI as a backend.
 
 Tracked config:
 
@@ -98,8 +100,8 @@ The copied LTX `.gguf` checkpoint is not visible through `/models/checkpoints` i
 
 ## App Implications
 
-- The first real generation test should use WAN 2.2 TI2V 5B safetensors because all core files are visible through native Comfy model folders.
+- The first real generation test should use the direct renderer with the smallest practical WAN profile that validates model loading on the RTX 5090.
 - WAN A14B FP8 safetensors are ready for high/low expert workflow testing.
-- WAN A14B Q8 GGUF is ready for GGUF-node workflow testing through `UnetLoaderGGUF`.
+- WAN A14B Q8 GGUF is present for future direct GGUF loader research.
 - WAN Lightning turbo mode can be tested with explicit high/low LoRA pairing.
-- LTX 2.3 assets are present, but advanced LTX execution still needs the LTX node/workflow path validated.
+- LTX 2.3 assets are present, but advanced LTX execution still needs a direct runtime path validated.

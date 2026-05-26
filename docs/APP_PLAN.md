@@ -2,9 +2,9 @@
 
 ## Product Concept
 
-Create a focused local-first video generation studio for WAN 2.2. It should feel like a purpose-built creative tool, not a node graph. ComfyUI can provide an early execution engine, workflow compatibility, model discovery, progress events, and output retrieval; the app owns the product model, queue, presets, settings validation, render history, and model strategy.
+Create a focused local-first video generation studio for WAN 2.2, with a clean path to support LTX later. It should feel like a purpose-built creative tool, not a node graph and not a ComfyUI wrapper.
 
-Future LTX support should be designed in from the start through an engine/model adapter layer.
+The app ships with its own standalone local render server. ComfyUI is technical inspiration only: a source of proven workflow anatomy, custom-node behavior, model placement clues, and performance lessons. It is not a runtime dependency, backend adapter, or required install.
 
 ## Default Target Machine
 
@@ -19,46 +19,48 @@ The default performance target is the owner's local Windows machine:
 - Python installs available: 3.10, 3.11, 3.12, 3.13
 - Node: 24.11.1
 
-This means the first-class target is not an 8 GB or 12 GB fallback profile. The app should default to high-performance WAN 2.2 workflows suitable for a 32 GB Blackwell card, while still offering lower-memory modes for portability.
+This means the first-class target is not an 8 GB or 12 GB fallback profile. The app should default to high-performance WAN 2.2 workflows suitable for a 32 GB Blackwell card, while still offering lower-memory modes later.
 
 ## Design Principles
 
-- Hide graph complexity without hiding power.
-- Use validated workflow templates rather than arbitrary user-created graphs for the MVP.
+- Hide model-pipeline complexity without hiding creative power.
+- Build a lean app for video generation, not a general workflow graph.
 - Treat model files, LoRAs, encoders, VAEs, and upscalers as first-class library assets.
 - Make memory/performance modes understandable and reversible.
 - Always preserve generation metadata so good results can be reproduced.
-- Avoid becoming a thin ComfyUI wrapper. ComfyUI is an engine option, not the product.
+- Keep runtime execution inside our app-managed direct renderer.
+- Use ComfyUI only as a read-only reference when we need to understand a working technique.
 
 ## MVP Scope
 
 ### Generation Modes
 
-- WAN 2.2 TI2V-5B text-to-video.
-- WAN 2.2 TI2V-5B image-to-video.
-- WAN 2.2 14B text-to-video preset if hardware/model validation passes.
-- WAN 2.2 14B image-to-video preset if hardware/model validation passes.
+- WAN 2.2 image-to-video using chunked segments.
+- WAN 2.2 text-to-video or TI2V once the direct runtime path is validated.
+- WAN 2.2 14B image-to-video presets for original and Lightning/turbo model profiles.
+- WAN 2.2 5B fallback profile if useful for speed or memory.
 
 ### Core Controls
 
-- Positive prompt and negative prompt.
+- Shared prompt or per-segment prompts.
+- Negative prompt.
 - Input image for I2V.
-- Resolution presets: 480p, 720p landscape, 720p portrait where workflow supports it.
-- Duration/frame count with model-safe increments.
-- FPS display and derived duration.
-- Seed: random, fixed, reuse.
-- Sampler/steps exposed through simple quality modes first.
-- LoRA stack with strength sliders and compatibility warnings.
-- Turbo toggle that switches to validated distilled workflow/model/LoRA combinations.
+- Segment count, seconds per segment, FPS, and derived duration.
+- Resolution and pixel-budget validation.
+- Seed: random, fixed, increment per segment.
+- Base model selector.
+- LoRA stack with role labels: creative, workflow/turbo, control.
+- Lightning/turbo profile that can treat performance LoRAs as part of the model profile.
+- Motion continuity controls: motion frames and motion amplitude.
 
 ### Render Management
 
-- Queue with pause/cancel/retry.
-- Live progress through ComfyUI WebSocket events.
-- Preview frames or thumbnails when available.
-- Output library with prompt, seed, model files, LoRAs, workflow version, and settings.
-- Compare two outputs side by side.
-- Re-run, remix, or upscale from a past render.
+- Queue with one active GPU job by default.
+- Cancel and retry.
+- Per-segment progress events.
+- Preview thumbnails or last completed segment.
+- Output library with prompt, segment prompts, seed, model files, LoRAs, runtime version, and settings.
+- Re-run, remix, reveal in folder, and compare.
 
 ## Recommended Architecture
 
@@ -66,93 +68,67 @@ This means the first-class target is not an 8 GB or 12 GB fallback profile. The 
 Desktop / Local Web UI
         |
         v
-App API Server
+App Render Server
         |
         +-- Project DB / render history
         +-- Model library scanner
-        +-- Workflow preset registry
-        +-- Engine adapters
+        +-- Preset registry
+        +-- Job queue
+        +-- Progress event stream
+        +-- Media stitching / thumbnails
+        +-- Direct renderer adapters
               |
-              +-- ComfyUI local adapter
-              |     +-- POST /prompt
-              |     +-- /ws progress
-              |     +-- /history output retrieval
-              |     +-- /system_stats and /models discovery
-              |
-              +-- Future direct WAN adapter
-              +-- Future LTX adapter
+              +-- Direct WAN renderer
+              +-- Direct LTX renderer
 ```
+
+The UI never talks to ComfyUI or raw model scripts. It talks to the app render server. The render server owns validation, job lifecycle, memory policy, direct inference calls, output collection, and metadata.
 
 ## Tech Stack Recommendation
 
 For a Windows-first local app:
 
 - UI: React + TypeScript + Vite.
-- Desktop shell: Tauri if we want a small native wrapper, or browser-first localhost for fastest iteration.
-- Backend: Python FastAPI for workflow generation, ComfyUI control, file management, and hardware probing.
+- Desktop shell: Tauri after the browser-first app shape stabilizes.
+- Backend/render server: Python, eventually FastAPI or another async server once queue/progress endpoints need it.
 - DB: SQLite.
 - Queue: local async worker with one active GPU job by default.
-- Media handling: FFmpeg for transcoding, thumbnails, metadata, and waveform/audio inspection later.
+- Media handling: FFmpeg for concat, transcode, thumbnails, and later audio handling.
+- Runtime environments: isolated project-managed Python environments for direct WAN and direct LTX.
 
-Why this shape: Python already fits the AI tooling ecosystem, while React gives us a polished control surface quickly. Keeping ComfyUI as an optional managed sidecar avoids reimplementing rapidly moving video inference internals before we know which parts are worth owning directly.
+Why this shape: Python fits the AI runtime ecosystem, React gives a polished control surface quickly, and a direct render server keeps the product lean instead of inheriting a general graph tool.
 
-## Engine Adapter Contract
+## Renderer Contract
 
 Each model family should implement:
 
 - `capabilities`: T2V, I2V, V2V, audio, controls, upscale, LoRA, turbo.
 - `validateSettings(settings, hardware, installedModels)`.
-- `buildWorkflow(settings)`.
-- `submit(workflow)`.
+- `prepareJob(plan)`.
+- `renderSegment(segmentPlan, continuityState)`.
 - `streamProgress(jobId)`.
 - `collectOutputs(jobId)`.
-- `freeMemory(strategy)`.
+- `releaseMemory(strategy)`.
 
-Initial adapters:
+Initial renderers:
 
-- `ComfyWanAdapter`: submits generated API workflows to local ComfyUI.
-- `DirectWanAdapter`: planned spike using WAN's native inference code once baseline Comfy execution works.
-- `ComfyLtxAdapter`: planned LTX support through ComfyUI-LTXVideo and/or built-in Comfy LTX nodes.
-- `DirectLtxAdapter`: optional later spike if direct LTX pipelines provide better control/performance.
+- `DirectWanRenderer`: direct WAN 2.2 inference owned by this project.
+- `DirectLtxRenderer`: direct LTX provider once WAN chunking is functional.
 
 Shared normalized settings:
 
-- prompt, negative prompt
-- seed
+- prompt and per-segment prompts
+- negative prompt
+- seed policy
 - width, height, frame count, fps
 - input assets
 - quality mode
 - memory profile
+- base model
 - LoRA list
 - output format
 
-Model-specific settings stay in an advanced panel, for example WAN high/low phase settings or LTX audio/upscaler settings.
-
-## Workflow Strategy
-
-Keep workflows in `workflows/` as versioned API-format JSON templates, plus a typed manifest:
-
-```json
-{
-  "id": "wan22-ti2v-5b-t2v",
-  "engine": "comfyui",
-  "family": "wan",
-  "model": "Wan2.2-TI2V-5B",
-  "mode": "t2v",
-  "requires": {
-    "diffusion_models": ["wan2.2_ti2v_5B_fp16.safetensors"],
-    "vae": ["wan2.2_vae.safetensors"],
-    "text_encoders": ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"]
-  },
-  "editableNodes": {
-    "prompt": {"node": "CLIPTextEncode", "input": "text"},
-    "seed": {"node": "KSampler", "input": "seed"},
-    "frames": {"node": "Wan22ImageToVideoLatent", "input": "length"}
-  }
-}
-```
-
-The app should never edit a raw workflow by brittle string replacement. It should parse JSON, patch known node IDs or semantic bindings from the manifest, validate, then submit.
+Model-specific settings stay in an advanced panel, for example WAN high/low phase settings or LTX-specific controls.
 
 ## Chunked WAN Strategy
 
@@ -162,40 +138,38 @@ The first production path should model the user's proven long-video workflow as 
 - `ContinuityPlan`: start image, previous segment frames, motion frame count, motion amplitude, duplicate-boundary trim policy.
 - `EnginePlan`: model files, text encoder, VAE, attention mode, LoRA stack, memory profile, and output format.
 
-The Comfy graph is an implementation detail. The app should generate segment plans from total duration and chunk duration, submit one segment at a time, feed the previous segment into the next segment, trim duplicate boundary frames, and concatenate the final result.
+The render server should generate segment plans from segment count, segment duration, FPS, and resolution. It should render one segment at a time, feed previous output frames into the next segment, trim duplicate boundary frames, concatenate the final result, and save metadata.
 
-The first Comfy implementation should use the native WAN/PainterLongVideo path from the reference workflow. `ComfyUI-WanVideoWrapper` remains a later alternate backend for advanced block swap, offload, cache, quantization, and control workflows.
+ComfyUI's `PainterLongVideo`, SageAttention patching, and video helper behavior can inform the implementation, but the shipped runtime should be direct code owned by this project.
 
 ## Memory Profiles
 
 ### Conservative
 
-- Prefer WAN 5B.
+- Prefer smaller WAN profiles.
 - Lower frame counts and 480p/short 720p presets.
-- Use FP8 text encoder.
-- Use ComfyUI auto/low VRAM behavior.
-- Allow VAE/text encoder CPU/offload where needed.
+- Use FP8 text encoder where quality allows.
+- Offload text encoder, VAE, or model blocks where needed.
 
 ### Balanced
 
-- WAN 5B 720p or 14B FP8 when available.
-- ComfyUI auto memory mode.
+- 720p or 1080p-class pixel budgets.
 - Moderate frame counts.
-- Default preview settings.
+- Direct renderer manages model residency based on queue state.
 
 ### Performance
 
 - Default profile for the RTX 5090 target machine.
 - For 32 GB VRAM and known-good model placement.
-- Prefer keeping models resident.
-- Avoid repeated unload/reload.
-- Useful for batches with same model and LoRA stack.
+- Prefer keeping reusable model components resident between segments.
+- Avoid repeated unload/reload within one render job.
 - Prioritize WAN 2.2 14B FP8/distilled workflows when installed.
 
 ### Turbo
 
-- Requires compatible LightX2V distilled models or LoRAs.
-- Uses 4-step/low-step presets.
+- Requires compatible distilled models or Lightning/LightX2V LoRAs.
+- Uses low-step presets.
+- Can be represented as a model profile when performance LoRAs are effectively part of the workflow.
 - Shows a visible compatibility note because distilled speed changes quality and prompt behavior.
 
 ### Experimental Max
@@ -209,58 +183,59 @@ The first Comfy implementation should use the native WAN/PainterLongVideo path f
 
 The model library should detect:
 
-- `diffusion_models`
-- `vae`
-- `text_encoders`
-- `clip_vision`
-- `loras`
-- `checkpoints`
-- `latent_upscale_models`
+- diffusion models / transformer weights
+- VAE files
+- text encoders
+- clip vision models
+- LoRAs
+- checkpoints
+- latent upscalers
 
-It should support external central model storage using ComfyUI's extra model paths rather than copying huge files.
+It should support central model storage through configured project paths or symlinks. The app should not require users to arrange files in ComfyUI folders.
 
 ## LoRA Handling
 
 WAN 2.2 needs two LoRA concepts:
 
 - Creative LoRAs: style, character, motion, camera, look.
-- Performance LoRAs: LightX2V/Lightning/distilled LoRAs.
+- Workflow/performance LoRAs: Lightning, LightX2V, distilled acceleration.
 
 The UI should:
 
 - Tag LoRAs by family: WAN, LTX, unknown.
-- Tag LoRAs by role: creative, control, turbo/distill.
+- Tag LoRAs by role: creative, control, turbo/distill/workflow.
 - Warn when a LoRA does not match the selected model family.
 - For WAN 14B, allow phase-specific high-noise/low-noise LoRA assignment.
+- Allow model profiles where workflow LoRAs are built in and not user-toggleable.
 - Store LoRA strength per render in metadata.
 
 ## Future LTX Support
 
-LTX 2.3 should be a second provider, not a fork of the WAN UI.
+LTX should be a second provider, not a fork of the WAN UI.
 
 Add capabilities:
 
-- Audio-video generation.
-- LTX distilled mode, 8 steps, CFG=1.
-- LTX IC-LoRA controls: depth, canny/edge, pose, motion tracking, HDR/lipdub where supported.
+- LTX image/video generation.
+- LTX distilled profiles.
+- LTX control LoRAs where supported.
 - Spatial and temporal upscaler stages.
 - LTX-safe dimension and frame-count validation.
 
-The first LTX integration should use ComfyUI-LTXVideo workflows, then later direct LTX pipelines if that becomes clearly better.
+The first LTX integration should be direct. Existing LTX Comfy nodes may be inspected for implementation ideas, but not used as the runtime backend.
 
 ## User Experience Layout
 
 Primary screens:
 
-- Generate: prompt, reference image, preset, LoRAs, quality, memory, queue.
-- Library: models, LoRAs, missing dependencies, download/install checklist.
+- Generate: prompt, segment prompts, reference image, preset, LoRAs, quality, memory, queue.
+- Library: models, LoRAs, missing dependencies, install checklist.
 - Renders: output grid, metadata, compare, remix, reveal in folder.
-- Settings: ComfyUI path, model paths, hardware profile, FFmpeg path, Git/project settings.
+- Settings: model paths, runtime paths, hardware profile, FFmpeg path, Git/project settings.
 
 Generate screen structure:
 
 - Left: prompt and shot settings.
-- Center: preview/output.
+- Center: preview/output and segment timeline.
 - Right: model, LoRA, memory, and advanced controls.
 - Bottom: queue/timeline/history strip.
 
@@ -272,64 +247,62 @@ Generate screen structure:
 - Save research and app plan.
 - Decide GitHub publishing details.
 
-### Phase 1: ComfyUI Control Spike
-
-- Detect/running ComfyUI.
-- Read `/system_stats`, `/models`, and `/object_info`.
-- Submit one known WAN 5B workflow.
-- Stream progress and collect output.
-- Record exact VRAM usage and timing on RTX 5090.
-
-### Phase 1B: Chunked Video Pipeline
-
-- Translate the working WAN 2.2 long-video workflow into app-level concepts.
-- Generate segment plans from total duration, chunk duration, FPS, and resolution.
-- Render each segment with previous-frame continuity.
-- Trim duplicate boundary frames between segments.
-- Concatenate segments automatically.
-- Store per-segment metadata, seed, model files, memory profile, and prompt.
-- Keep the raw Comfy graph hidden behind typed settings.
-
-### Phase 1.5: Direct WAN Spike
-
-- Install WAN 2.2 native inference environment in an isolated project environment.
-- Verify PyTorch CUDA support on RTX 5090.
-- Run the smallest practical WAN 2.2 command-line generation.
-- Compare direct WAN vs ComfyUI on setup complexity, speed, memory behavior, LoRA handling, and output management.
-- Decide whether MVP execution should be Comfy-first, direct-first, or dual-backend.
-
-### Phase 2: MVP UI
+### Phase 1: App Shell And Planning
 
 - Build Generate screen.
-- Add workflow preset manifest.
-- Add settings validation.
-- Add render history DB.
+- Add segment planner.
+- Add shared/per-segment prompt controls.
+- Add base model and LoRA controls.
+- Add planner API endpoint.
 
-### Phase 3: Model and LoRA Library
+### Phase 2: Direct WAN Runtime Spike
+
+- Keep runtime isolated from global Python.
+- Validate Torch/CUDA/SageAttention/FlashAttention options on RTX 5090.
+- Load the smallest practical WAN profile without rendering first.
+- Render a minimal single-segment smoke test.
+- Record VRAM, timing, package versions, model files, and output metadata.
+
+### Phase 3: Render Server
+
+- Add render job model.
+- Add queue and cancellation.
+- Add progress event stream.
+- Render one WAN segment from a `SegmentPlan`.
+- Store output and metadata.
+
+### Phase 4: Chunked Rendering
+
+- Render N segments in sequence.
+- Pass previous output frames into the next segment.
+- Trim duplicate boundaries.
+- Concatenate final video.
+- Store per-segment prompt, seed, model, LoRA, memory, and timing metadata.
+
+### Phase 5: Model And LoRA Library
 
 - Scan model directories.
 - Show missing model checklist.
 - Add LoRA tagging and compatibility warnings.
-- Add external model path guidance.
+- Add model profile validation.
 
-### Phase 4: Turbo and Optimization
+### Phase 6: Turbo And Optimization
 
-- Add LightX2V distilled workflow support.
+- Add Lightning/LightX2V profile support.
 - Add memory profiles.
 - Add batch queue policies.
 - Add model unload/free-memory controls.
 
-### Phase 5: LTX Adapter
+### Phase 7: LTX Direct Renderer
 
-- Add LTX 2.3 model family.
-- Add LTX ComfyUI workflow presets.
-- Add audio output handling.
-- Add spatial/temporal upscaler workflows.
+- Add LTX model family.
+- Add LTX-specific validation.
+- Add LTX direct runtime spike.
+- Add upscaler stages where useful.
 
 ## Open Decisions
 
-- App form: browser localhost first, or Tauri desktop from the beginning.
-- Whether the app should install/manage ComfyUI or only connect to an existing install.
-- GitHub visibility and license.
-- Whether first MVP should prioritize 14B/turbo on RTX 5090, with 5B as fallback.
-- Whether ComfyUI remains the primary runtime or becomes an import/export compatibility layer after the Direct WAN spike.
+- App form: browser localhost first, or Tauri desktop once core rendering works.
+- Exact direct WAN runtime package layout.
+- License.
+- Whether first real renderer should start with 14B/turbo on RTX 5090, with 5B as fallback, or the other way around for faster iteration.

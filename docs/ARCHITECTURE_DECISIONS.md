@@ -1,10 +1,10 @@
 # Architecture Decisions
 
-## ADR-001: Product-Led App, Not a ComfyUI Wrapper
+## ADR-001: Standalone Product, Not A ComfyUI Wrapper
 
 Status: accepted
 
-The app must not be a simplified skin over ComfyUI. It should own the product experience:
+The app must not be a simplified skin over ComfyUI, and it must not rely on ComfyUI as its rendering backend. It should own the product experience and the rendering server:
 
 - generation modes
 - model and LoRA library
@@ -15,9 +15,7 @@ The app must not be a simplified skin over ComfyUI. It should own the product ex
 - memory/performance profiles
 - future WAN/LTX provider abstraction
 
-ComfyUI is useful because it already has fast-moving video model support, workflow execution, progress events, custom nodes, model discovery, and a local API. That makes it a strong first execution backend.
-
-But ComfyUI is not the product boundary. The app should call into an engine adapter, and ComfyUI should be only one implementation of that adapter.
+ComfyUI remains useful as read-only technical inspiration. Its workflows and custom nodes can teach us how proven video pipelines handle conditioning, chunking, LoRAs, attention patches, VAE memory pressure, and output stitching. Those ideas should be translated into app-owned direct renderer code, not delegated to ComfyUI at runtime.
 
 ## ADR-002: RTX 5090 Is The Default Performance Target
 
@@ -34,16 +32,13 @@ The owner's machine is the default target:
 
 The app should therefore optimize first for 32 GB Blackwell workflows. Low-VRAM support remains important, but it should not define the main experience.
 
-## ADR-003: Compare ComfyUI and Direct Inference Early
+## ADR-003: Direct Renderer Is The Runtime Path
 
 Status: accepted
 
-The first technical milestone should not blindly commit to ComfyUI. It should compare:
+The rendering server should execute WAN/LTX directly inside project-managed runtimes. ComfyUI is not a backend option for the product.
 
-- ComfyUI WAN execution through API workflows.
-- Direct WAN 2.2 inference through the model repository code.
-
-The decision should be based on measured behavior on the RTX 5090:
+The first runtime milestone should focus on direct WAN execution and measure:
 
 - install complexity
 - PyTorch/CUDA reliability
@@ -54,7 +49,7 @@ The decision should be based on measured behavior on the RTX 5090:
 - error handling
 - ability to support LTX later
 
-Expected starting bias: ComfyUI is likely faster to integrate and easier to keep current, while direct inference may provide better ownership and a cleaner non-node product model if the upstream code is stable enough.
+ComfyUI experiments already performed are historical reference only. They are useful for understanding working settings and memory behavior, but they do not define the app runtime architecture.
 
 ## ADR-004: Use Isolated Runtimes
 
@@ -63,9 +58,9 @@ Status: accepted
 Do not pollute the global Python installs. Create isolated environments for:
 
 - app backend
-- ComfyUI runtime, if managed by this project
 - direct WAN runtime
-- direct LTX runtime, later
+- direct LTX runtime
+- optional tooling/probe runtimes
 
 This matters because Windows, Blackwell, CUDA, PyTorch, Triton, xFormers, SageAttention, flash-attention alternatives, and custom nodes can have conflicting dependency requirements.
 
@@ -83,7 +78,7 @@ The app should own:
 - final concatenation
 - per-segment timing, seed, model, LoRA, and memory metadata
 
-ComfyUI nodes such as `PainterLongVideo`, `PathchSageAttentionKJ`, and `VHS_VideoCombine` can be used underneath an adapter, but the user should interact with shot settings and duration controls instead of a node graph.
+ComfyUI nodes such as `PainterLongVideo`, `PathchSageAttentionKJ`, and `VHS_VideoCombine` are useful references for how chunking, attention, and video output can work. The shipped app should implement equivalent concepts in its own planner, direct renderer, media pipeline, and metadata system.
 
 ## ADR-006: Reference Comfy Install Is Read-Only Inspiration
 
@@ -92,3 +87,20 @@ Status: accepted
 The existing install at `D:\IMAGE_GENERATORS\Comfy_UI_Furkan_V61\ComfyUI` is a reference environment only. It should not be modified by this project.
 
 The project may inspect it to understand node behavior, model placement, and proven workflow patterns. Runtime experiments, dependency installs, generated outputs, and managed app execution should happen inside `D:\VIDEO_GENS\wan-ltx-video-studio` or other explicitly created project directories.
+
+## ADR-007: App Server Becomes The Render Server
+
+Status: accepted
+
+The local Python API should grow into the rendering server. The UI should submit render jobs to this server, and the server should own:
+
+- queueing and cancellation
+- one active GPU render by default
+- model and LoRA resolution
+- segment-by-segment direct inference
+- progress events
+- output stitching through FFmpeg or direct media utilities
+- render metadata and history
+- memory cleanup and model residency policy
+
+This keeps the product lean and purpose-built while avoiding the complexity and visual-node mental model of a general workflow tool.

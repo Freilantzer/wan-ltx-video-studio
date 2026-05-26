@@ -2,7 +2,7 @@
 
 A planned local-first video generation app focused on WAN 2.2, with a clean path to support the current open LTX family later.
 
-The goal is not to recreate a node graph UI. The app should expose a focused, powerful video-generation workspace while using proven workflow engines underneath, starting with ComfyUI in headless/API mode.
+The goal is not to recreate a node graph UI. The app should expose a focused, powerful video-generation workspace with its own standalone local render server. ComfyUI is reference material for workflow behavior and node implementation details, not a runtime dependency or backend target.
 
 ## Current Status
 

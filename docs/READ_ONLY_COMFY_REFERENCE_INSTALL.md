@@ -84,7 +84,7 @@ Relevant features found in source:
 - Cache methods: TeaCache, MagCache, EasyCache.
 - VAE loader option for CPU cache.
 
-App implication: this is a strong reference for the app's advanced memory profile design, even if MVP starts with native Comfy WAN nodes.
+App implication: this is a strong reference for the app's advanced memory profile design. The shipped runtime should still be the app's standalone direct renderer.
 
 ### Future LTX Reference
 
@@ -105,6 +105,7 @@ App implication: GGUF, caching, and quantized kernels should be treated as selec
 ## Design Takeaways
 
 - The product should not launch against this reference install directly.
+- ComfyUI is not a product backend.
 - The reference workflow's node logic should become a typed `SegmentPlan` and `ContinuityPlan`.
 - The app should generate or execute chunked jobs, not one monolithic long latent by default.
 - The app should track per-chunk VRAM and timing.

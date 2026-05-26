@@ -2,7 +2,7 @@
 
 Date: 2026-05-26
 
-The first app-owned runtime primitive is a chunked video planner. It converts simple product settings into exact segment jobs before any ComfyUI or direct model backend is involved.
+The first app-owned runtime primitive is a chunked video planner. It converts simple product settings into exact segment jobs before direct model rendering is involved.
 
 ## Why This Exists
 
@@ -40,14 +40,14 @@ The planner currently validates:
 
 The default pixel budget allows 1280 x 1600, 1920 x 1080, and equivalent 32 GB VRAM test targets while rejecting larger accidental jumps until a profile explicitly opts in.
 
-## Next Adapter Step
+## Next Renderer Step
 
-The Comfy adapter should consume `SegmentPlan` objects and generate an API workflow using the native WAN/PainterLongVideo path:
+The direct render server should consume `SegmentPlan` objects and execute the equivalent WAN pipeline:
 
 - first segment receives a start image or text-only start
 - later segments receive previous segment frames/video
-- KSampler high and low phases use the chosen model profile
+- high and low noise phases use the chosen model profile
 - duplicate boundary frames are trimmed before concat
 - output metadata records every segment plan
 
-`ComfyUI-WanVideoWrapper` should be evaluated after this baseline for block swap, offload, cache, quantization, and control workflows.
+ComfyUI custom nodes remain implementation references only. Runtime execution should happen through our standalone renderer.

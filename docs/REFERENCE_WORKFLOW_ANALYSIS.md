@@ -115,7 +115,7 @@ The app should expose this as simple controls:
 - Seed behavior
 - Memory profile
 
-Internally, the engine adapter can generate a workflow graph equivalent to:
+Internally, the direct renderer should implement stages equivalent to:
 
 ```text
 VideoJob
@@ -132,4 +132,4 @@ VideoJob
 
 The earlier A14B `--highvram` test remains useful only as a pressure test. It was not representative of the user's working setup.
 
-Next implementation should focus on a typed chunked-generation adapter based on this reference workflow, not more ad hoc Comfy benchmarking.
+Next implementation should focus on the standalone direct render server based on this reference workflow's behavior, not more ad hoc Comfy benchmarking.

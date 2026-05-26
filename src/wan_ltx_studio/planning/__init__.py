@@ -1,4 +1,4 @@
-"""Planning primitives shared by UI and engine adapters."""
+"""Planning primitives shared by the UI and direct render server."""
 
 from wan_ltx_studio.planning.chunked_video import (
     ChunkedVideoPlan,

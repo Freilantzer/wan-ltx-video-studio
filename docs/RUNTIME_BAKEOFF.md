@@ -2,7 +2,9 @@
 
 Started: 2026-05-26
 
-Goal: compare WAN 2.2 direct inference with WAN 2.2 through ComfyUI on the RTX 5090 target machine before deciding which runtime should power the MVP.
+Goal: historical notes from comparing WAN 2.2 direct inference with WAN 2.2 through ComfyUI on the RTX 5090 target machine.
+
+Current architectural decision: the app should ship a standalone direct render server. ComfyUI is retained only as a technical reference for workflow behavior, custom node logic, model placement, and memory lessons.
 
 ## Isolation Strategy
 
@@ -194,9 +196,9 @@ Common LTX nodes include:
 App implication:
 
 - Treat these presets as references, not product architecture.
-- For WAN MVP, prefer a lean workflow using native/official Comfy nodes where possible.
+- For WAN MVP, prefer a lean standalone direct renderer.
 - If using V89 presets directly, we need SwarmUI ExtraNodes and potentially RIFE/frame interpolation nodes.
-- For LTX 2.3, the Lightricks ComfyUI-LTXVideo nodes are likely necessary for advanced audio/video workflows.
+- For LTX, inspect existing node implementations as reference if needed, but build the product runtime directly.
 
 ## Local Model Library
 
@@ -262,23 +264,21 @@ This was not representative of the user's working long-video setup. See `docs/RE
 Immediate memory-management implication:
 
 - Do not default A14B to `--highvram`.
-- Prefer a safer default profile with Comfy's normal/offload memory management.
+- Prefer a safer default profile with app-owned offload and memory management.
 - Use WAN 2.2 TI2V 5B as the first normal preset candidate.
 - Re-test A14B with GGUF and/or offload-managed FP8 before considering it for a "Performance" preset.
 
 ## Current Runtime Ranking
 
-1. `comfyui-sec-v89`: best optimized Comfy candidate because SageAttention/FlashAttention/xFormers/Triton import and Comfy starts with Sage Attention on RTX 5090.
-2. `comfyui`: best clean stability baseline with newer Torch 2.12/cu130 and Comfy CUDA backend.
-3. `direct-wan`: promising ownership path, but needs model-weight generation test and a decision on FlashAttention/source builds.
+1. `direct-wan`: product runtime direction; native WAN repo imports and CLI help work, but still needs a model-weight generation test and a decision on FlashAttention/source builds.
+2. `comfyui-sec-v89`: historical optimized reference because SageAttention/FlashAttention/xFormers/Triton import and Comfy starts with Sage Attention on RTX 5090.
+3. `comfyui`: historical clean reference with newer Torch 2.12/cu130 and Comfy CUDA backend.
 
 ## Next Bake-Off Step
 
-Run a minimal real generation with a safer memory profile, starting with local WAN 2.2 TI2V 5B safetensors in:
+Run a minimal real generation with a safer memory profile, starting with local WAN 2.2 TI2V 5B or the smallest practical WAN direct profile in:
 
-1. `comfyui-sec-v89` with Sage Attention.
-2. `comfyui` clean runtime.
-3. `direct-wan` using PyTorch attention fallback.
+1. `direct-wan` using PyTorch attention fallback or an available optimized attention path.
 
 Capture:
 
@@ -286,5 +286,5 @@ Capture:
 - peak VRAM
 - startup/model-load time
 - output correctness
-- workflow/API complexity
+- direct renderer integration complexity
 - LoRA/turbo path viability

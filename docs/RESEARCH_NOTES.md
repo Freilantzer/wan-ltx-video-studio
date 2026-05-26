@@ -85,12 +85,12 @@ App implication:
 
 ComfyUI exposes memory strategy controls such as `auto`, `lowvram`, `normalvram`, `highvram`, `novram`, and `cpu`, plus precision settings for UNET, VAE, and text encoder.
 
-WAN's own inference flags include `--offload_model`, `--convert_model_dtype`, and `--t5_cpu`; ComfyUI's native offloading and model management cover similar concerns for the Comfy backend.
+WAN's own inference flags include `--offload_model`, `--convert_model_dtype`, and `--t5_cpu`. These are more relevant to the standalone renderer than ComfyUI's runtime controls.
 
 Initial app memory profiles:
 
 - `Conservative`: lower resolution/frame count, CPU/offload-friendly, VAE/text encoder savings.
-- `Balanced`: 5B or FP8 14B workflows, default Comfy smart memory.
+- `Balanced`: 5B or FP8 14B workflows, app-owned offload and model residency.
 - `Performance`: high-VRAM mode, keep models resident, fewer unloads.
 - `Turbo`: distilled/4-step models or LoRAs, reduced steps, FP8/INT8 where validated.
 
@@ -103,7 +103,7 @@ LTX-2.3 is the current open LTX line found during research. It is a 22B audio-vi
 - Distilled LoRA.
 - Spatial and temporal latent upscalers.
 - Text/image/video/audio modes depending on workflow.
-- ComfyUI support through built-in nodes plus `ComfyUI-LTXVideo` custom nodes for advanced workflows.
+- Existing ComfyUI-LTXVideo nodes are useful implementation references, but LTX support should be direct in the app runtime.
 
 LTX uses a different capability surface from WAN:
 
