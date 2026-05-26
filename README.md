@@ -1,42 +1,84 @@
 # WAN/LTX Video Studio
 
-A planned local-first video generation app focused on WAN 2.2, with a clean path to support the current open LTX family later.
+WAN/LTX Video Studio is a local-first video generation app for focused WAN 2.2 production, with a path to add open LTX models later.
 
-The goal is not to recreate a node graph UI. The app should expose a focused, powerful video-generation workspace with its own standalone local render server. ComfyUI is reference material for workflow behavior and node implementation details, not a runtime dependency or backend target.
+The goal is a lean studio for prompt-driven and image-driven video work: segment planning, model selection, LoRAs, turbo profiles, VRAM-aware rendering, output history, and repeatable long-video workflows. The app owns its local render server and uses proven ComfyUI workflows as technical reference material.
 
-## Current Status
+## Project State
 
-- Local project folder created at `D:\VIDEO_GENS\wan-ltx-video-studio`.
-- Git repository initialized and pushed to GitHub.
-- Planning docs and architecture decisions created under `docs/`.
-- Local model library mapped under `models/` and ignored by git.
-- First app-owned planning code added under `src/`.
-- First runnable local app scaffold added under `apps/web/`.
+The project lives at:
 
-## Project Docs
+```text
+D:\VIDEO_GENS\wan-ltx-video-studio
+```
 
-- [App plan](docs/APP_PLAN.md)
-- [Architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
-- [Chunked video planner](docs/CHUNKED_VIDEO_PLANNER.md)
-- [VRAM targets](docs/VRAM_TARGETS.md)
-- [Research notes](docs/RESEARCH_NOTES.md)
-- [Reference workflow analysis](docs/REFERENCE_WORKFLOW_ANALYSIS.md)
-- [Read-only Comfy reference install](docs/READ_ONLY_COMFY_REFERENCE_INSTALL.md)
+The GitHub repository is:
 
-## Working Product Direction
+```text
+git@github.com:Freilantzer/wan-ltx-video-studio.git
+```
 
-Build a desktop or local web app with:
+Current working pieces:
 
-- WAN 2.2 text-to-video, image-to-video, and hybrid text/image-to-video presets.
-- LoRA library management, including normal creative LoRAs and turbo/distillation LoRAs.
-- Turbo mode built from validated distilled/4-step workflows, not magic settings.
-- Hardware-aware memory modes for 8 GB, 12-16 GB, 24 GB, and high-VRAM machines.
-- Queue, batch, prompt versioning, seed management, previews, and render history.
-- A model/provider abstraction so LTX 2.x/2.3 can be added without rebuilding the UI.
+- React/Vite local web app under `apps/web/`.
+- Python package under `src/wan_ltx_studio/`.
+- Local development API with render planning endpoints.
+- Segment planner for 1 to many chunked video segments.
+- Model/profile metadata for WAN 2.2 and future LTX providers.
+- Local model-library mapping with large model files ignored by git.
+- Direct WAN 2.2 5B runner for smoke tests and calibration.
+- GPU opt-in guard for render execution.
+- Staged CUDA memory telemetry written into render results.
+- Windows dedicated/shared GPU memory sidecar telemetry via `typeperf`.
+- Documentation for architecture, VRAM targets, local models, reference workflow analysis, and direct renderer behavior.
+
+## Current Renderer
+
+The first executable backend path is `wan22_ti2v_5b_fp16`. It proves the app-owned renderer can load local WAN model files, encode prompts/start frames, run sampling, decode VAE output, and save MP4s directly.
+
+Completed calibration work:
+
+- 640x352 smoke render completed successfully.
+- 5B start-frame and text-only calibration renders completed.
+- 81-frame 1280x720 sampling reached the end of diffusion at about 24 GB dedicated VRAM.
+- Pre-VAE offload now moves the DiT and text encoder to CPU before decode.
+- Temporal VAE streaming was implemented and measured.
+
+Latest 720p finding:
+
+Sampling fits the RTX 5090 target, but 81-frame 720p VAE decode still needs spatial tiling. The next renderer milestone is a WAN VAE tiled decode path with overlap blending and CPU accumulation, using shared GPU memory as a hard warning signal.
+
+## Target Workflow
+
+The first serious production target is based on the user's proven WAN 2.2 I2V workflow:
+
+- WAN 2.2 A14B high-noise and low-noise experts.
+- 1280x720.
+- 81 frames per segment.
+- 16 fps.
+- 1 to 5 practical segments, with longer chains possible through continuity.
+- Target dedicated VRAM around 25 GB on the RTX 5090 32 GB machine.
+- Per-segment prompts, seeds, model choices, LoRAs, timing, and VRAM telemetry.
+- Last-frame or continuity-frame carryover between segments.
+- Duplicate boundary-frame trimming before final concat.
+
+## Open Gaps
+
+The main items still ahead:
+
+- Spatial tiled WAN VAE decode for 720p/81.
+- API progress stream and cancellation state.
+- Render details in the UI, including telemetry and output metadata.
+- A14B FP8 scaled weight support.
+- High/low expert loading with only the active expert on CUDA.
+- Lightning/Turbo LoRA routing for the correct expert.
+- User-facing model and LoRA selectors wired to the render plan.
+- LTX provider implementation.
+- Packaged local desktop experience.
 
 ## Development
 
-Run the Python tests with:
+Run the Python tests:
 
 ```powershell
 $env:PYTHONPATH = "$PWD\src"
@@ -58,10 +100,28 @@ npm install
 npm run dev -- --port 5173
 ```
 
-Then open:
+Open:
 
 ```text
 http://127.0.0.1:5173/
 ```
 
-The current app does not start ComfyUI or load models. It plans segment timelines through the local API.
+Run a safe renderer dry-run:
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+python -m wan_ltx_studio.rendering.single_segment_runner --dry-run --profile wan22_ti2v_5b_fp16 --prompt "test" --output renders\dry_run.mp4
+```
+
+Real GPU renders require `--allow-gpu`.
+
+## Project Docs
+
+- [App plan](docs/APP_PLAN.md)
+- [Architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
+- [Direct renderer backend](docs/DIRECT_RENDERER_BACKEND.md)
+- [Chunked video planner](docs/CHUNKED_VIDEO_PLANNER.md)
+- [VRAM targets](docs/VRAM_TARGETS.md)
+- [Research notes](docs/RESEARCH_NOTES.md)
+- [Reference workflow analysis](docs/REFERENCE_WORKFLOW_ANALYSIS.md)
+- [Read-only Comfy reference install](docs/READ_ONLY_COMFY_REFERENCE_INSTALL.md)
