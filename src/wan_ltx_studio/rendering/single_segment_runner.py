@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -213,6 +213,8 @@ def _run_ti2v_5b_segment_inner(
     telemetry.mark("text_encoder_loaded_cpu")
     pipeline.vae = _load_wan22_vae(Wan2_2_VAE, components["vae"], pipeline.device)
     telemetry.mark("vae_loaded_cuda")
+    _install_streaming_vae_decode(pipeline.vae, pipeline, telemetry, torch)
+    telemetry.mark("vae_streaming_temporal_decode_installed")
     pipeline.model = _load_ti2v_model(WanModel, cfg, components["dit"])
     telemetry.mark("dit_loaded_cpu")
     _install_component_memory_hooks(pipeline, telemetry, expected_dit_forwards=config.sample_steps * 2)
@@ -238,6 +240,7 @@ def _run_ti2v_5b_segment_inner(
         offload_model=config.offload_model,
     )
     telemetry.mark("after_generate", synchronize=True)
+    _offload_vae_after_decode(pipeline.vae, telemetry, torch)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     telemetry.mark("before_save_video")
@@ -481,6 +484,141 @@ def _is_float(value: str) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _install_streaming_vae_decode(vae, pipeline, telemetry: _CudaMemoryTelemetry, torch_module) -> None:
+    import types
+    import wan.modules.vae2_2 as vae2_2
+
+    def streaming_decode(self, zs):
+        if not isinstance(zs, list):
+            raise TypeError("zs should be a list")
+        _offload_non_vae_components_before_decode(pipeline, telemetry, torch_module)
+        with _vae_autocast_context(torch_module, self):
+            return [
+                _decode_wan22_vae_temporal_stream(
+                    self,
+                    latent,
+                    unpatchify_fn=vae2_2.unpatchify,
+                    telemetry=telemetry,
+                    torch_module=torch_module,
+                    video_index=video_index,
+                )
+                for video_index, latent in enumerate(zs)
+            ]
+
+    vae.decode = types.MethodType(streaming_decode, vae)
+
+
+def _offload_non_vae_components_before_decode(pipeline, telemetry: _CudaMemoryTelemetry, torch_module) -> None:
+    telemetry.mark("pre_vae_decode_offload_start")
+    if getattr(pipeline, "model", None) is not None:
+        pipeline.model.cpu()
+    text_encoder = getattr(pipeline, "text_encoder", None)
+    if text_encoder is not None and getattr(text_encoder, "model", None) is not None:
+        text_encoder.model.cpu()
+    gc.collect()
+    if torch_module.cuda.is_available():
+        torch_module.cuda.synchronize()
+        torch_module.cuda.empty_cache()
+    telemetry.mark("pre_vae_decode_offload_end", synchronize=torch_module.cuda.is_available())
+
+
+def _offload_vae_after_decode(vae, telemetry: _CudaMemoryTelemetry, torch_module) -> None:
+    telemetry.mark("post_vae_decode_offload_start")
+    if getattr(vae, "model", None) is not None:
+        vae.model.cpu()
+    gc.collect()
+    if torch_module.cuda.is_available():
+        torch_module.cuda.synchronize()
+        torch_module.cuda.empty_cache()
+    telemetry.mark("post_vae_decode_offload_end", synchronize=torch_module.cuda.is_available())
+
+
+def _vae_autocast_context(torch_module, vae):
+    device = vae.device
+    device_type = getattr(device, "type", str(device))
+    if device_type != "cuda":
+        return nullcontext()
+    return torch_module.cuda.amp.autocast(dtype=vae.dtype)
+
+
+def _decode_wan22_vae_temporal_stream(
+    vae,
+    latent,
+    *,
+    unpatchify_fn,
+    telemetry: _CudaMemoryTelemetry | None,
+    torch_module,
+    video_index: int = 0,
+):
+    model = vae.model
+    model.clear_cache()
+    latent_is_cuda = getattr(latent, "is_cuda", False)
+    try:
+        z = latent.unsqueeze(0)
+        if hasattr(vae.scale[0], "view"):
+            z = z / vae.scale[1].view(1, model.z_dim, 1, 1, 1) + vae.scale[0].view(
+                1, model.z_dim, 1, 1, 1
+            )
+        else:
+            z = z / vae.scale[1] + vae.scale[0]
+
+        x = model.conv2(z)
+        total_chunks = int(x.shape[2])
+        decoded_chunks = []
+        if telemetry:
+            telemetry.mark(
+                "vae_temporal_decode_conv2_end",
+                {"videoIndex": video_index, "chunks": total_chunks},
+                synchronize=latent_is_cuda,
+            )
+
+        for chunk_index in range(total_chunks):
+            model._conv_idx = [0]
+            decoder_kwargs = {
+                "feat_cache": model._feat_map,
+                "feat_idx": model._conv_idx,
+            }
+            if chunk_index == 0:
+                decoder_kwargs["first_chunk"] = True
+
+            decoded_gpu = model.decoder(
+                x[:, :, chunk_index : chunk_index + 1, :, :],
+                **decoder_kwargs,
+            )
+            decoded_gpu = unpatchify_fn(decoded_gpu, patch_size=2)
+            decoded_cpu = decoded_gpu.float().clamp_(-1, 1).squeeze(0).cpu()
+            decoded_chunks.append(decoded_cpu)
+            del decoded_gpu
+            _empty_cuda_cache_for_tensor(torch_module, latent)
+
+            if telemetry and _should_mark_vae_chunk(chunk_index + 1, total_chunks):
+                telemetry.mark(
+                    "vae_temporal_decode_chunk_cpu",
+                    {
+                        "videoIndex": video_index,
+                        "chunk": chunk_index + 1,
+                        "chunks": total_chunks,
+                        "chunkFrames": int(decoded_cpu.shape[1]),
+                        "cpuChunksHeld": len(decoded_chunks),
+                    },
+                    synchronize=latent_is_cuda,
+                )
+
+        return torch_module.cat(decoded_chunks, dim=1)
+    finally:
+        model.clear_cache()
+        _empty_cuda_cache_for_tensor(torch_module, latent)
+
+
+def _empty_cuda_cache_for_tensor(torch_module, tensor) -> None:
+    if getattr(tensor, "is_cuda", False):
+        torch_module.cuda.empty_cache()
+
+
+def _should_mark_vae_chunk(chunk_number: int, total_chunks: int) -> bool:
+    return chunk_number <= 2 or chunk_number == total_chunks or chunk_number % 4 == 0
 
 
 def _runner_warnings(config: SegmentRunnerConfig) -> list[str]:

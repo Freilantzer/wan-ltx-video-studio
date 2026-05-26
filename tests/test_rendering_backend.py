@@ -14,6 +14,7 @@ from wan_ltx_studio.rendering import (
 from wan_ltx_studio.rendering.single_segment_runner import (
     _CudaMemoryTelemetry,
     _convert_comfy_umt5_state_dict,
+    _decode_wan22_vae_temporal_stream,
     _install_attention_fallback,
     _normalize_wan22_vae_state_dict,
     _parse_typeperf_gpu_memory_sample,
@@ -230,6 +231,67 @@ class RenderingBackendTests(unittest.TestCase):
         self.assertEqual(parsed["windowsDedicatedUsageGb"], 3.0)
         self.assertEqual(parsed["windowsSharedUsageGb"], 0.75)
         self.assertEqual(parsed["windowsTotalCommittedGb"], 3.75)
+
+    def test_streaming_wan_vae_decode_concatenates_temporal_chunks_on_cpu(self):
+        import torch
+
+        class FakeModel:
+            z_dim = 3
+
+            def __init__(self):
+                self.clear_count = 0
+                self.decoder_calls = []
+                self._feat_map = [None]
+                self._conv_idx = [0]
+
+            def clear_cache(self):
+                self.clear_count += 1
+                self._feat_map = [None]
+                self._conv_idx = [0]
+
+            def conv2(self, z):
+                return z
+
+            def decoder(self, x, feat_cache, feat_idx, first_chunk=False):
+                self.decoder_calls.append(first_chunk)
+                return x
+
+        class FakeVae:
+            def __init__(self):
+                self.model = FakeModel()
+                self.scale = [0.0, 1.0]
+
+        class FakeTelemetry:
+            def __init__(self):
+                self.stages = []
+
+            def mark(self, stage, detail=None, synchronize=False):
+                self.stages.append((stage, detail, synchronize))
+
+        latent = torch.stack(
+            [
+                torch.full((3, 2, 2), 0.1),
+                torch.full((3, 2, 2), 0.2),
+                torch.full((3, 2, 2), 0.3),
+            ],
+            dim=1,
+        )
+        telemetry = FakeTelemetry()
+        fake_vae = FakeVae()
+
+        decoded = _decode_wan22_vae_temporal_stream(
+            fake_vae,
+            latent,
+            unpatchify_fn=lambda tensor, patch_size: tensor,
+            telemetry=telemetry,
+            torch_module=torch,
+        )
+
+        self.assertEqual(tuple(decoded.shape), (3, 3, 2, 2))
+        self.assertFalse(decoded.is_cuda)
+        self.assertEqual(fake_vae.model.decoder_calls, [True, False, False])
+        self.assertEqual([stage for stage, _, _ in telemetry.stages][0], "vae_temporal_decode_conv2_end")
+        self.assertEqual([stage for stage, _, _ in telemetry.stages][-1], "vae_temporal_decode_chunk_cpu")
 
     def test_non_executable_profile_cannot_build_runner_command(self):
         job = build_render_job_plan(
