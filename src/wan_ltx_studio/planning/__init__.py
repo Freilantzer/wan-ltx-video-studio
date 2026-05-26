@@ -3,6 +3,7 @@
 from wan_ltx_studio.planning.chunked_video import (
     ChunkedVideoPlan,
     ContinuityPlan,
+    LoraSelection,
     PlanningError,
     SeedPolicy,
     SegmentPlan,
@@ -14,6 +15,7 @@ from wan_ltx_studio.planning.chunked_video import (
 __all__ = [
     "ChunkedVideoPlan",
     "ContinuityPlan",
+    "LoraSelection",
     "PlanningError",
     "SeedPolicy",
     "SegmentPlan",

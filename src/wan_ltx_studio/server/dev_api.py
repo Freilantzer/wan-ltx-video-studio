@@ -6,7 +6,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from wan_ltx_studio import __version__
-from wan_ltx_studio.planning import PlanningError, SeedPolicy, VideoRequest, plan_chunked_video
+from wan_ltx_studio.planning import (
+    LoraSelection,
+    PlanningError,
+    SeedPolicy,
+    VideoRequest,
+    plan_chunked_video,
+)
 
 
 class StudioApiHandler(BaseHTTPRequestHandler):
@@ -83,9 +89,12 @@ def _request_from_payload(payload: dict[str, Any]) -> VideoRequest:
         chunk_seconds=_float(payload, "chunkSeconds", 5.0),
         start_image=_optional_str(payload, "startImage"),
         prompt=_str(payload, "prompt", ""),
+        segment_prompts=_segment_prompts(payload),
         negative_prompt=_str(payload, "negativePrompt", ""),
         seed=_optional_int(payload, "seed"),
         seed_policy=SeedPolicy(_str(payload, "seedPolicy", SeedPolicy.FIXED.value)),
+        base_model=_str(payload, "baseModel", "wan22_i2v_a14b_fp8_original"),
+        loras=_loras(payload),
         pixel_budget=_int(payload, "pixelBudget", 2_100_000),
         boundary_trim_frames=_int(payload, "boundaryTrimFrames", 1),
         motion_frames=_int(payload, "motionFrames", 10),
@@ -102,6 +111,19 @@ def _plan_to_payload(plan: Any) -> dict[str, Any]:
         "targetDurationSeconds": plan.target_duration_seconds,
         "actualOutputDurationSeconds": plan.actual_output_duration_seconds,
         "pixels": plan.request.pixels,
+        "engine": {
+            "baseModel": plan.request.base_model,
+            "loras": [
+                {
+                    "name": lora.name,
+                    "strength": lora.strength,
+                    "role": lora.role,
+                    "enabled": lora.enabled,
+                }
+                for lora in plan.request.loras
+                if lora.enabled
+            ],
+        },
         "segments": [
             {
                 "index": segment.index,
@@ -114,6 +136,7 @@ def _plan_to_payload(plan: Any) -> dict[str, Any]:
                 "inputDurationSeconds": segment.input_duration_seconds,
                 "outputDurationSeconds": segment.output_duration_seconds,
                 "seed": segment.seed,
+                "prompt": segment.prompt,
                 "continuity": {
                     "source": segment.continuity.source,
                     "trimStartFrames": segment.continuity.trim_start_frames,
@@ -157,3 +180,34 @@ def _optional_str(payload: dict[str, Any], key: str) -> str | None:
     if value in (None, ""):
         return None
     return str(value)
+
+
+def _segment_prompts(payload: dict[str, Any]) -> tuple[str, ...]:
+    value = payload.get("segmentPrompts", ())
+    if value in (None, ""):
+        return ()
+    if not isinstance(value, list):
+        raise TypeError("segmentPrompts must be a list")
+    return tuple(str(item) for item in value)
+
+
+def _loras(payload: dict[str, Any]) -> tuple[LoraSelection, ...]:
+    value = payload.get("loras", ())
+    if value in (None, ""):
+        return ()
+    if not isinstance(value, list):
+        raise TypeError("loras must be a list")
+
+    loras: list[LoraSelection] = []
+    for item in value:
+        if not isinstance(item, dict):
+            raise TypeError("each LoRA must be an object")
+        loras.append(
+            LoraSelection(
+                name=_str(item, "name", ""),
+                strength=_float(item, "strength", 1.0),
+                role=_str(item, "role", "creative"),
+                enabled=bool(item.get("enabled", True)),
+            )
+        )
+    return tuple(loras)

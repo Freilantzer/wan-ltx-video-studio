@@ -15,6 +15,16 @@ class DevApiPayloadTests(unittest.TestCase):
                 "chunkSeconds": 5,
                 "seed": 42,
                 "seedPolicy": "increment",
+                "baseModel": "wan22_i2v_a14b_fp8_original",
+                "segmentPrompts": ["opening", "middle", "ending"],
+                "loras": [
+                    {
+                        "name": "wan_lightning_high",
+                        "role": "workflow",
+                        "strength": 1.0,
+                        "enabled": True,
+                    }
+                ],
             }
         )
         response = _plan_to_payload(plan_chunked_video(request))
@@ -22,6 +32,9 @@ class DevApiPayloadTests(unittest.TestCase):
         self.assertEqual(response["targetTimelineFrames"], 240)
         self.assertEqual(response["actualOutputFrames"], 241)
         self.assertEqual(response["segments"][2]["seed"], 44)
+        self.assertEqual(response["segments"][0]["prompt"], "opening")
+        self.assertEqual(response["engine"]["baseModel"], "wan22_i2v_a14b_fp8_original")
+        self.assertEqual(response["engine"]["loras"][0]["role"], "workflow")
         self.assertEqual(response["segments"][1]["continuity"]["source"], "previous_segment")
 
 

@@ -92,6 +92,24 @@ class ChunkedVideoPlannerTests(unittest.TestCase):
 
         self.assertEqual([segment.seed for segment in plan.segments], [500, 501, 502])
 
+    def test_segment_prompts_override_shared_prompt(self):
+        plan = plan_chunked_video(
+            VideoRequest(
+                width=1280,
+                height=720,
+                fps=16,
+                total_seconds=15,
+                chunk_seconds=5,
+                prompt="shared city drive",
+                segment_prompts=("enter downtown", "", "cross the bridge"),
+            )
+        )
+
+        self.assertEqual(
+            [segment.prompt for segment in plan.segments],
+            ["enter downtown", "shared city drive", "cross the bridge"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

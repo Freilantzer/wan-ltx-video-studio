@@ -21,6 +21,14 @@ class SeedPolicy(str, Enum):
 
 
 @dataclass(frozen=True)
+class LoraSelection:
+    name: str
+    strength: float = 1.0
+    role: str = "creative"
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class VideoRequest:
     width: int
     height: int
@@ -29,9 +37,12 @@ class VideoRequest:
     chunk_seconds: float = 5.0
     start_image: str | None = None
     prompt: str = ""
+    segment_prompts: tuple[str, ...] = ()
     negative_prompt: str = ""
     seed: int | None = None
     seed_policy: SeedPolicy | str = SeedPolicy.FIXED
+    base_model: str = "wan22_i2v_a14b_fp8_original"
+    loras: tuple[LoraSelection, ...] = ()
     pixel_budget: int = DEFAULT_RTX_5090_PIXEL_BUDGET
     dimension_multiple: int = DEFAULT_DIMENSION_MULTIPLE
     frame_stride: int = WAN_FRAME_STRIDE
@@ -147,7 +158,7 @@ def plan_chunked_video(request: VideoRequest) -> ChunkedVideoPlan:
                 input_frames=input_frames,
                 output_frames=output_frames,
                 seed=_segment_seed(request.seed, seed_policy, index),
-                prompt=request.prompt,
+                prompt=_segment_prompt(request, index),
                 negative_prompt=request.negative_prompt,
                 continuity=ContinuityPlan(
                     source=_continuity_source(request, index),
@@ -202,6 +213,11 @@ def _validate_request(request: VideoRequest) -> None:
         raise PlanningError("motion_frames cannot be negative")
     if request.motion_amplitude < 1.0:
         raise PlanningError("motion_amplitude must be at least 1.0")
+    if not request.base_model:
+        raise PlanningError("base_model is required")
+    for lora in request.loras:
+        if not lora.name:
+            raise PlanningError("LoRA name is required")
     SeedPolicy(request.seed_policy)
 
 
@@ -225,3 +241,11 @@ def _continuity_source(request: VideoRequest, segment_index: int) -> str:
     if request.start_image:
         return "start_image"
     return "none"
+
+
+def _segment_prompt(request: VideoRequest, segment_index: int) -> str:
+    if segment_index < len(request.segment_prompts):
+        prompt = request.segment_prompts[segment_index].strip()
+        if prompt:
+            return prompt
+    return request.prompt

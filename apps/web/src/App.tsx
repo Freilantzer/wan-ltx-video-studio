@@ -4,6 +4,7 @@ import {
   FolderOpen,
   Gauge,
   Image,
+  Layers3,
   Play,
   RefreshCw,
   Save,
@@ -14,18 +15,31 @@ import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 
 type SeedPolicy = "fixed" | "increment" | "none";
+type PromptMode = "shared" | "perSegment";
+
+type LoraSelection = {
+  id: string;
+  name: string;
+  role: "workflow" | "creative";
+  strength: number;
+  enabled: boolean;
+};
 
 type FormState = {
   width: number;
   height: number;
-  totalSeconds: number;
+  segmentCount: number;
   fps: number;
   chunkSeconds: number;
   startImage: string;
   prompt: string;
+  promptMode: PromptMode;
+  segmentPrompts: string[];
   negativePrompt: string;
   seed: number;
   seedPolicy: SeedPolicy;
+  baseModel: string;
+  loras: LoraSelection[];
   pixelBudget: number;
   motionFrames: number;
   motionAmplitude: number;
@@ -38,6 +52,7 @@ type SegmentPlan = {
   inputDurationSeconds: number;
   outputDurationSeconds: number;
   seed: number | null;
+  prompt: string;
   continuity: {
     source: string;
     trimStartFrames: number;
@@ -56,20 +71,97 @@ type PlanResponse = {
   targetDurationSeconds: number;
   actualOutputDurationSeconds: number;
   pixels: number;
+  engine: {
+    baseModel: string;
+    loras: Array<{
+      name: string;
+      role: string;
+      strength: number;
+      enabled: boolean;
+    }>;
+  };
   segments: SegmentPlan[];
 };
+
+const modelProfiles = [
+  {
+    id: "wan22_i2v_a14b_fp8_original",
+    label: "WAN 2.2 I2V A14B FP8",
+    note: "Original",
+    family: "WAN 2.2",
+    includesLightning: false,
+  },
+  {
+    id: "wan22_i2v_a14b_fp8_lightning_workflow",
+    label: "WAN 2.2 I2V A14B FP8 + Lightning",
+    note: "Workflow",
+    family: "WAN 2.2",
+    includesLightning: true,
+  },
+  {
+    id: "wan22_ti2v_5b_fp16",
+    label: "WAN 2.2 TI2V 5B",
+    note: "5B",
+    family: "WAN 2.2",
+    includesLightning: false,
+  },
+  {
+    id: "wan22_i2v_a14b_q8_gguf",
+    label: "WAN 2.2 I2V A14B Q8 GGUF",
+    note: "GGUF",
+    family: "WAN 2.2",
+    includesLightning: false,
+  },
+  {
+    id: "ltx23_dev_distilled",
+    label: "LTX 2.3 Dev Distilled",
+    note: "LTX",
+    family: "LTX",
+    includesLightning: false,
+  },
+];
+
+const defaultPrompt = "cinematic POV drive through a dense city at dusk, natural camera motion, detailed streets";
+
+const defaultLoras: LoraSelection[] = [
+  {
+    id: "wan_lightning_high_noise",
+    name: "WAN Lightning high-noise",
+    role: "workflow",
+    strength: 1,
+    enabled: false,
+  },
+  {
+    id: "wan_lightning_low_noise",
+    name: "WAN Lightning low-noise",
+    role: "workflow",
+    strength: 1,
+    enabled: false,
+  },
+  {
+    id: "cinematic_motion",
+    name: "Cinematic motion",
+    role: "creative",
+    strength: 0.65,
+    enabled: false,
+  },
+];
 
 const defaultForm: FormState = {
   width: 1280,
   height: 720,
-  totalSeconds: 15,
+  segmentCount: 3,
   fps: 16,
   chunkSeconds: 5,
   startImage: "inputs/start_frames_1280x720/woman_black_sand_beach.png",
-  prompt: "cinematic handheld shot, natural motion, detailed environment",
+  prompt: defaultPrompt,
+  promptMode: "shared",
+  segmentPrompts: [defaultPrompt, defaultPrompt, defaultPrompt],
   negativePrompt: "blur, low quality, flicker, warped hands, extra limbs, text",
   seed: 1234,
   seedPolicy: "fixed",
+  baseModel: "wan22_i2v_a14b_fp8_original",
+  loras: defaultLoras,
   pixelBudget: 2_100_000,
   motionFrames: 10,
   motionAmplitude: 1.15,
@@ -87,7 +179,9 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
+  const totalSeconds = form.segmentCount * form.chunkSeconds;
   const pixelMegapixels = useMemo(() => form.width * form.height / 1_000_000, [form.width, form.height]);
+  const activeModel = modelProfiles.find((model) => model.id === form.baseModel) ?? modelProfiles[0];
 
   async function refreshPlan(nextForm = form) {
     setIsLoading(true);
@@ -95,7 +189,7 @@ export function App() {
       const response = await fetch("/api/plan", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(nextForm),
+        body: JSON.stringify(toPlanPayload(nextForm)),
       });
       const payload = await response.json();
       if (!response.ok) {
@@ -122,6 +216,30 @@ export function App() {
     setForm((current) => ({ ...current, [key]: value }));
   }
 
+  function updateSegmentCount(value: number) {
+    const segmentCount = clamp(Math.round(value || 1), 1, 5);
+    setForm((current) => ({
+      ...current,
+      segmentCount,
+      segmentPrompts: resizePrompts(current.segmentPrompts, segmentCount, current.prompt),
+    }));
+  }
+
+  function updateSegmentPrompt(index: number, value: string) {
+    setForm((current) => {
+      const segmentPrompts = resizePrompts(current.segmentPrompts, current.segmentCount, current.prompt);
+      segmentPrompts[index] = value;
+      return { ...current, segmentPrompts };
+    });
+  }
+
+  function updateLora(id: string, patch: Partial<LoraSelection>) {
+    setForm((current) => ({
+      ...current,
+      loras: current.loras.map((lora) => (lora.id === id ? { ...lora, ...patch } : lora)),
+    }));
+  }
+
   return (
     <main className="app-shell">
       <header className="top-bar">
@@ -129,7 +247,7 @@ export function App() {
           <Sparkles size={20} aria-hidden="true" />
           <div>
             <h1>WAN/LTX Video Studio</h1>
-            <span>Planner engine</span>
+            <span>{activeModel.family} planner</span>
           </div>
         </div>
         <div className="top-actions">
@@ -149,14 +267,43 @@ export function App() {
       <section className="studio-grid">
         <aside className="panel left-panel" aria-label="Shot settings">
           <PanelHeader icon={<Image size={17} />} title="Shot" />
-          <label className="field">
-            <span>Positive</span>
-            <textarea
-              value={form.prompt}
-              onChange={(event) => updateField("prompt", event.target.value)}
-              rows={7}
-            />
-          </label>
+          <div className="segmented">
+            <button
+              className={form.promptMode === "shared" ? "selected" : ""}
+              onClick={() => updateField("promptMode", "shared")}
+            >
+              Shared
+            </button>
+            <button
+              className={form.promptMode === "perSegment" ? "selected" : ""}
+              onClick={() => updateField("promptMode", "perSegment")}
+            >
+              Per Segment
+            </button>
+          </div>
+          {form.promptMode === "shared" ? (
+            <label className="field">
+              <span>Positive</span>
+              <textarea
+                value={form.prompt}
+                onChange={(event) => updateField("prompt", event.target.value)}
+                rows={7}
+              />
+            </label>
+          ) : (
+            <div className="segment-prompt-list">
+              {Array.from({ length: form.segmentCount }, (_, index) => (
+                <label className="field" key={index}>
+                  <span>Segment {index + 1}</span>
+                  <textarea
+                    value={form.segmentPrompts[index] ?? form.prompt}
+                    onChange={(event) => updateSegmentPrompt(index, event.target.value)}
+                    rows={3}
+                  />
+                </label>
+              ))}
+            </div>
+          )}
           <label className="field">
             <span>Negative</span>
             <textarea
@@ -205,6 +352,7 @@ export function App() {
             </div>
             <div className="preview-metrics">
               <Metric icon={<Clock3 size={16} />} label="Duration" value={formatSeconds(plan?.actualOutputDurationSeconds)} />
+              <Metric icon={<Layers3 size={16} />} label="Segments" value={String(form.segmentCount)} />
               <Metric icon={<Activity size={16} />} label="Frames" value={plan ? String(plan.actualOutputFrames) : "-"} />
               <Metric icon={<Gauge size={16} />} label="Pixels" value={`${pixelMegapixels.toFixed(2)} MP`} />
             </div>
@@ -218,7 +366,7 @@ export function App() {
           <div className="panel queue-panel">
             <PanelHeader icon={<Play size={17} />} title="Queue" />
             <div className="queue-row">
-              <span>Idle</span>
+              <span>{activeModel.label}</span>
               <button className="primary-button" title="Queue render" disabled>
                 <Play size={16} aria-hidden="true" />
                 Queue
@@ -230,8 +378,25 @@ export function App() {
         <aside className="panel right-panel" aria-label="Engine settings">
           <PanelHeader icon={<Settings size={17} />} title="Engine" />
           <div className="segmented">
-            <button className="selected">WAN 2.2</button>
-            <button>LTX</button>
+            <button className={activeModel.family === "WAN 2.2" ? "selected" : ""}>WAN 2.2</button>
+            <button className={activeModel.family === "LTX" ? "selected" : ""}>LTX</button>
+          </div>
+          <label className="field">
+            <span>Base model</span>
+            <select
+              value={form.baseModel}
+              onChange={(event) => updateField("baseModel", event.target.value)}
+            >
+              {modelProfiles.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="model-chip-row">
+            <span className="model-chip">{activeModel.note}</span>
+            {activeModel.includesLightning ? <span className="model-chip">Lightning in workflow</span> : null}
           </div>
           <div className="field-grid">
             <label className="field">
@@ -253,16 +418,18 @@ export function App() {
               />
             </label>
             <label className="field">
-              <span>Seconds</span>
+              <span>Segments</span>
               <input
                 type="number"
-                step={0.25}
-                value={form.totalSeconds}
-                onChange={(event) => updateField("totalSeconds", Number(event.target.value))}
+                min={1}
+                max={5}
+                step={1}
+                value={form.segmentCount}
+                onChange={(event) => updateSegmentCount(Number(event.target.value))}
               />
             </label>
             <label className="field">
-              <span>Chunk</span>
+              <span>Seconds/seg</span>
               <input
                 type="number"
                 step={0.25}
@@ -311,10 +478,35 @@ export function App() {
               </button>
             ))}
           </div>
+          <div className="lora-list">
+            {form.loras.map((lora) => (
+              <div className="lora-row" key={lora.id}>
+                <label className="check-label">
+                  <input
+                    type="checkbox"
+                    checked={activeModel.includesLightning && lora.role === "workflow" ? true : lora.enabled}
+                    disabled={activeModel.includesLightning && lora.role === "workflow"}
+                    onChange={(event) => updateLora(lora.id, { enabled: event.target.checked })}
+                  />
+                  <span>{lora.name}</span>
+                </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={1.5}
+                  step={0.05}
+                  value={lora.strength}
+                  disabled={!lora.enabled || (activeModel.includesLightning && lora.role === "workflow")}
+                  onChange={(event) => updateLora(lora.id, { strength: Number(event.target.value) })}
+                />
+                <strong>{activeModel.includesLightning && lora.role === "workflow" ? "built in" : lora.strength.toFixed(2)}</strong>
+              </div>
+            ))}
+          </div>
           <div className="summary-grid">
             <Metric label="Target" value={plan ? `${plan.targetTimelineFrames} f` : "-"} />
             <Metric label="Chunk" value={plan ? `${plan.requestedChunkFrames} f` : "-"} />
-            <Metric label="Extra" value={plan ? `${plan.extraOutputFrames} f` : "-"} />
+            <Metric label="Total" value={formatSeconds(totalSeconds)} />
             <Metric label="Status" value={isLoading ? "Planning" : "Ready"} />
           </div>
           <div className="button-row">
@@ -331,6 +523,37 @@ export function App() {
       </section>
     </main>
   );
+}
+
+function toPlanPayload(form: FormState) {
+  const activeModel = modelProfiles.find((model) => model.id === form.baseModel) ?? modelProfiles[0];
+  const loras = form.loras
+    .filter((lora) => lora.enabled && !(activeModel.includesLightning && lora.role === "workflow"))
+    .map((lora) => ({
+      name: lora.id,
+      role: lora.role,
+      strength: lora.strength,
+      enabled: lora.enabled,
+    }));
+
+  return {
+    width: form.width,
+    height: form.height,
+    totalSeconds: form.segmentCount * form.chunkSeconds,
+    fps: form.fps,
+    chunkSeconds: form.chunkSeconds,
+    startImage: form.startImage,
+    prompt: form.prompt,
+    segmentPrompts: form.promptMode === "perSegment" ? resizePrompts(form.segmentPrompts, form.segmentCount, form.prompt) : [],
+    negativePrompt: form.negativePrompt,
+    seed: form.seed,
+    seedPolicy: form.seedPolicy,
+    baseModel: form.baseModel,
+    loras,
+    pixelBudget: form.pixelBudget,
+    motionFrames: form.motionFrames,
+    motionAmplitude: form.motionAmplitude,
+  };
 }
 
 function PanelHeader({ icon, title }: { icon: ReactNode; title: string }) {
@@ -384,11 +607,20 @@ function Timeline({ plan }: { plan: PlanResponse | null }) {
             <span>{segment.outputFrames} out</span>
             <span>{segment.continuity.source}</span>
             <span>{segment.seed ?? "-"}</span>
+            <span title={segment.prompt}>{segment.prompt}</span>
           </div>
         ))}
       </div>
     </div>
   );
+}
+
+function resizePrompts(prompts: string[], segmentCount: number, fallback: string) {
+  return Array.from({ length: segmentCount }, (_, index) => prompts[index] ?? fallback);
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
 }
 
 function formatSeconds(value: number | undefined) {
