@@ -1,10 +1,8 @@
 # Scripts
 
-Project helper scripts will live here.
+Project helper scripts live here.
 
-Likely first scripts:
-
-- `probe_comfy.py`: check ComfyUI availability, system stats, node inventory, and model lists.
-- `submit_workflow.py`: submit a workflow API JSON file to a local ComfyUI instance.
-- `scan_models.py`: inspect configured model directories and produce a compatibility report.
-
+- `run_dev_api.py`: start the local planner API used by the web app.
+- `probe_comfy.py`: planned ComfyUI availability, system stats, node inventory, and model list probe.
+- `submit_workflow.py`: planned workflow API submitter for generated Comfy adapter graphs.
+- `scan_models.py`: planned model directory compatibility report.

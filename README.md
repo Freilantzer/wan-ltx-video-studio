@@ -11,6 +11,7 @@ The goal is not to recreate a node graph UI. The app should expose a focused, po
 - Planning docs and architecture decisions created under `docs/`.
 - Local model library mapped under `models/` and ignored by git.
 - First app-owned planning code added under `src/`.
+- First runnable local app scaffold added under `apps/web/`.
 
 ## Project Docs
 
@@ -34,11 +35,32 @@ Build a desktop or local web app with:
 
 ## Development
 
-Run the current dependency-free tests with:
+Run the Python tests with:
 
 ```powershell
 $env:PYTHONPATH = "$PWD\src"
 python -m unittest discover -s tests
 ```
 
-The current code does not start ComfyUI or load models. It only plans segment timelines.
+Run the development API:
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+python .\scripts\run_dev_api.py --host 127.0.0.1 --port 8787
+```
+
+Run the web app:
+
+```powershell
+cd .\apps\web
+npm install
+npm run dev -- --port 5173
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5173/
+```
+
+The current app does not start ComfyUI or load models. It plans segment timelines through the local API.
