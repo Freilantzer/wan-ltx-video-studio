@@ -1,0 +1,56 @@
+# Python / Node
+.venv/
+venv/
+env/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+
+# Generated media and caches
+outputs/
+renders/
+previews/
+cache/
+temp/
+tmp/
+*.mp4
+*.mov
+*.webm
+*.mkv
+*.avi
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.wav
+*.flac
+*.mp3
+
+# Model weights and large ML artifacts
+models/
+ComfyUI/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.gguf
+*.bin
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
