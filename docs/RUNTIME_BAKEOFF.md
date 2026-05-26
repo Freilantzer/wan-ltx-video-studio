@@ -257,6 +257,8 @@ Conclusion:
 
 This validates the A14B high/low model and Lightning LoRA wiring, but the `--highvram` execution profile is too aggressive for a safe default. It keeps the card nearly full even for a tiny smoke run. The app should treat this as a pressure-test profile only.
 
+This was not representative of the user's working long-video setup. See `docs/REFERENCE_WORKFLOW_ANALYSIS.md` for the chunked 3x5s reference workflow that produced 1280x720 for about 15 seconds at roughly 80% dedicated VRAM in the user's Comfy environment.
+
 Immediate memory-management implication:
 
 - Do not default A14B to `--highvram`.

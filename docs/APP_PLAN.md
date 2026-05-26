@@ -268,6 +268,16 @@ Generate screen structure:
 - Stream progress and collect output.
 - Record exact VRAM usage and timing on RTX 5090.
 
+### Phase 1B: Chunked Video Pipeline
+
+- Translate the working WAN 2.2 long-video workflow into app-level concepts.
+- Generate segment plans from total duration, chunk duration, FPS, and resolution.
+- Render each segment with previous-frame continuity.
+- Trim duplicate boundary frames between segments.
+- Concatenate segments automatically.
+- Store per-segment metadata, seed, model files, memory profile, and prompt.
+- Keep the raw Comfy graph hidden behind typed settings.
+
 ### Phase 1.5: Direct WAN Spike
 
 - Install WAN 2.2 native inference environment in an isolated project environment.
