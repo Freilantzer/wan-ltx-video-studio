@@ -56,6 +56,9 @@ The standalone renderer should reproduce the memory behavior with app-owned code
 - Use SageAttention or equivalent optimized attention when available.
 - Use PyTorch allocator settings equivalent to `max_split_size_mb:256,expandable_segments:True` where appropriate.
 - Keep VAE/text encoder/model residency explicit and measurable.
+- Offload text encoder and diffusion experts before VAE decode.
+- Decode 720p/81 VAE output with spatial tiling, overlap blending, and CPU accumulation.
 - Record peak VRAM per segment and per full job.
+- Treat Windows shared GPU memory usage as an unsafe spill condition, even if CUDA does not throw an OOM.
 
 The acceptance target for the first serious 720p direct A14B I2V renderer is not "fits in 32 GB"; it is "stays around the proven 25 GB profile."

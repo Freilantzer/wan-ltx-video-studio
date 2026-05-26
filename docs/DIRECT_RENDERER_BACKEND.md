@@ -107,6 +107,30 @@ The first standalone mitigation is a streaming temporal VAE decode path for WAN 
 
 Follow-up 81-frame 1280x720 test result: pre-VAE cleanup worked, dropping driver-used VRAM to about `3.5` GB before decode. Temporal streaming still failed at 720p because the VAE decoder's per-spatial-chunk activation cost crossed dedicated VRAM and spilled into shared GPU memory. The run reached about `31.1` GB dedicated plus `9.75` GB shared before it was stopped. Conclusion: temporal streaming is useful but insufficient; 720p/81 needs spatial tiled VAE decode or a Comfy-equivalent tiled VAE fallback.
 
+## Comfy Memory Findings
+
+The reference Comfy behavior is not a single trick. It combines runtime-wide model residency management with VAE-specific tiled decode paths.
+
+Core Comfy memory behavior observed in the read-only install:
+
+- The launch script sets `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True` and starts Comfy with `--use-sage-attention --disable-smart-memory`.
+- `--disable-smart-memory` does not disable offload. It makes Comfy's model manager aggressively offload instead of keeping models in VRAM when it can.
+- `load_models_gpu()` budgets model memory plus inference memory, calls `free_memory()` before model loads, and can partially load/offload modules through low-VRAM patching.
+- Standard `VAEDecode` calls `vae.decode(...)`; Comfy's VAE wrapper estimates decode memory, loads only the VAE patcher, and can retry with tiled VAE decode after a CUDA OOM.
+- `VAEDecodeTiled` is an explicit node path, but the inspected workflow uses plain `VAEDecode`, so the working reference does not require the user to manually choose a tiled node.
+
+Custom-node behavior in the reference install also matters:
+
+- `comfyui-multigpu` patches `soft_empty_cache()` and some device-selection functions. On this one-GPU machine, the most relevant effect is broader cache cleanup and CPU/RAM pressure handling, not actual multi-GPU scheduling.
+- `ComfyUI-WanVideoWrapper` is Apache-2.0 licensed and contains a WAN-specific tiled VAE decode implementation: split latent spatial tiles, decode one tile at a time, blend overlaps with feather masks, accumulate output on CPU, and offload the VAE afterward.
+
+Implementation implication for this standalone renderer:
+
+- Keep the current pre-VAE full offload step.
+- Add a spatial tiled WAN VAE decode path with overlap blending and CPU accumulation.
+- Keep Windows dedicated/shared telemetry as the guardrail; success means avoiding shared GPU spill, not merely avoiding a Python OOM.
+- Prefer an app-owned implementation of the concept. Copying Comfy core code would pull in GPLv3 obligations; WanVideoWrapper's relevant code is Apache-2.0, but a clean implementation is still easier to maintain.
+
 ## Next Slice
 
 The next backend slice is to harden the render path before enabling longer jobs:
@@ -114,6 +138,7 @@ The next backend slice is to harden the render path before enabling longer jobs:
 - stream progress and cancellation state into the local API
 - surface render lock state in the UI
 - surface staged VRAM telemetry in the UI/API render details
+- implement spatial tiled WAN VAE decode with overlap blending and CPU accumulation
 - install or build a proper compiled attention kernel for the production runtime
 - then implement A14B FP8 linear support and high/low expert loading
 - apply profile LoRAs to the correct high/low expert only
