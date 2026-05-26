@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+runtimes/
 
 # Local environment and secrets
 .env
@@ -53,4 +54,3 @@ ComfyUI/
 Thumbs.db
 .idea/
 .vscode/
-
