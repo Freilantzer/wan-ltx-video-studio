@@ -97,6 +97,10 @@ The direct runner emits staged CUDA memory snapshots under `telemetry.stages`. E
 
 The current staged checkpoints cover CUDA setup, pipeline shell creation, text encoder load and forward calls, VAE load/encode/decode, DiT CPU load, DiT transfer to/from CUDA, selected DiT sampling forward calls, save, and cleanup. The top-level `peakAllocatedGb`, `peakReservedGb`, and `peakDriverUsedGb` fields remain as compact summary values.
 
+The runner also writes the same staged snapshots to a sidecar file next to the target video, using the suffix `.telemetry.jsonl`. This is deliberate: if the process is killed or CUDA raises an out-of-memory error during VAE decode, the completed stage snapshots are still available for post-mortem.
+
+An 81-frame 1280x720 start-frame run with the 5B path completed all 8 sampling steps at about `24.1` GB driver VRAM, then pinned around `32.0` GB during VAE decode and was manually stopped before a driver-level OOM. Conclusion: sampling fits, but full-frame VAE decode needs Comfy-style memory handling before 720p/81 can be considered supported.
+
 ## Next Slice
 
 The next backend slice is to harden the render path before enabling longer jobs:

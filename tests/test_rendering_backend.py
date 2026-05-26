@@ -195,9 +195,12 @@ class RenderingBackendTests(unittest.TestCase):
         class FakeTorch:
             cuda = FakeCuda()
 
-        telemetry = _CudaMemoryTelemetry(FakeTorch)
-        snapshot = telemetry.mark("after_load", {"component": "test"}, synchronize=True)
-        summary = telemetry.summary()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            telemetry_path = Path(temp_dir) / "telemetry.jsonl"
+            telemetry = _CudaMemoryTelemetry(FakeTorch, telemetry_path)
+            snapshot = telemetry.mark("after_load", {"component": "test"}, synchronize=True)
+            summary = telemetry.summary()
+            sidecar_lines = telemetry_path.read_text(encoding="utf-8").splitlines()
 
         self.assertEqual(snapshot["stage"], "after_load")
         self.assertEqual(snapshot["allocatedGb"], 1.0)
@@ -208,6 +211,9 @@ class RenderingBackendTests(unittest.TestCase):
         self.assertEqual(summary["peakReservedGb"], 4.0)
         self.assertEqual(summary["peakDriverUsedGb"], 5.0)
         self.assertEqual(summary["stages"][0]["stage"], "after_load")
+        self.assertEqual(summary["telemetryPath"], str(telemetry_path.resolve()))
+        self.assertEqual(len(sidecar_lines), 1)
+        self.assertIn('"stage": "after_load"', sidecar_lines[0])
 
     def test_non_executable_profile_cannot_build_runner_command(self):
         job = build_render_job_plan(

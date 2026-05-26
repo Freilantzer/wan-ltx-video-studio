@@ -119,10 +119,13 @@ def _run_ti2v_5b_segment(
     if not torch.cuda.is_available():
         raise SegmentRunnerError("CUDA is not available")
 
+    output_path = Path(config.output_path).resolve()
+    telemetry_path = output_path.with_suffix(".telemetry.jsonl")
+
     _install_attention_fallback()
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.empty_cache()
-    telemetry = _CudaMemoryTelemetry(torch)
+    telemetry = _CudaMemoryTelemetry(torch, telemetry_path)
     telemetry.mark("cuda_ready", {"profileId": config.profile_id})
 
     cfg = EasyDict(WAN_CONFIGS["ti2v-5B"])
@@ -186,7 +189,6 @@ def _run_ti2v_5b_segment(
     )
     telemetry.mark("after_generate", synchronize=True)
 
-    output_path = Path(config.output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     telemetry.mark("before_save_video")
     save_video(
@@ -208,14 +210,19 @@ def _run_ti2v_5b_segment(
 
     summary = telemetry.summary()
     summary["outputBytes"] = output_path.stat().st_size if output_path.exists() else None
+    summary["telemetryPath"] = str(telemetry_path)
     return summary
 
 
 class _CudaMemoryTelemetry:
-    def __init__(self, torch_module):
+    def __init__(self, torch_module, sidecar_path: str | Path | None = None):
         self.torch = torch_module
         self.started = time.perf_counter()
         self.stages: list[dict[str, Any]] = []
+        self.sidecar_path = Path(sidecar_path).resolve() if sidecar_path else None
+        if self.sidecar_path:
+            self.sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+            self.sidecar_path.write_text("", encoding="utf-8")
 
     def mark(
         self,
@@ -250,6 +257,7 @@ class _CudaMemoryTelemetry:
         if detail:
             snapshot["detail"] = detail
         self.stages.append(snapshot)
+        self._write_sidecar(snapshot)
         return snapshot
 
     def summary(self) -> dict[str, Any]:
@@ -274,6 +282,8 @@ class _CudaMemoryTelemetry:
             peak_driver = max(driver_peaks)
             summary["peakDriverUsedBytes"] = peak_driver
             summary["peakDriverUsedGb"] = _bytes_to_gb(peak_driver)
+        if self.sidecar_path:
+            summary["telemetryPath"] = str(self.sidecar_path)
         return summary
 
     def _driver_memory_snapshot(self) -> dict[str, Any]:
@@ -291,6 +301,12 @@ class _CudaMemoryTelemetry:
             "driverTotalGb": _bytes_to_gb(total_bytes),
             "driverUsedGb": _bytes_to_gb(used_bytes),
         }
+
+    def _write_sidecar(self, snapshot: dict[str, Any]) -> None:
+        if not self.sidecar_path:
+            return
+        with self.sidecar_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(snapshot, sort_keys=True) + "\n")
 
 
 def _bytes_to_gb(value: int | float) -> float:
