@@ -2,9 +2,24 @@
 
 ## Product Concept
 
-Create a focused local-first video generation studio for WAN 2.2. It should feel like a purpose-built creative tool, not a node graph. ComfyUI provides the execution engine, workflow compatibility, model discovery, progress events, and output retrieval; the app provides a clean video workflow with guardrails.
+Create a focused local-first video generation studio for WAN 2.2. It should feel like a purpose-built creative tool, not a node graph. ComfyUI can provide an early execution engine, workflow compatibility, model discovery, progress events, and output retrieval; the app owns the product model, queue, presets, settings validation, render history, and model strategy.
 
 Future LTX support should be designed in from the start through an engine/model adapter layer.
+
+## Default Target Machine
+
+The default performance target is the owner's local Windows machine:
+
+- GPU: NVIDIA GeForce RTX 5090
+- VRAM: 32 GB class, reported as 32607 MiB
+- Driver: 591.86
+- CUDA runtime reported by `nvidia-smi`: 13.1
+- Active CUDA Toolkit in `CUDA_PATH`: 12.8
+- Active `nvcc`: 12.8.61
+- Python installs available: 3.10, 3.11, 3.12, 3.13
+- Node: 24.11.1
+
+This means the first-class target is not an 8 GB or 12 GB fallback profile. The app should default to high-performance WAN 2.2 workflows suitable for a 32 GB Blackwell card, while still offering lower-memory modes for portability.
 
 ## Design Principles
 
@@ -13,6 +28,7 @@ Future LTX support should be designed in from the start through an engine/model 
 - Treat model files, LoRAs, encoders, VAEs, and upscalers as first-class library assets.
 - Make memory/performance modes understandable and reversible.
 - Always preserve generation metadata so good results can be reproduced.
+- Avoid becoming a thin ComfyUI wrapper. ComfyUI is an engine option, not the product.
 
 ## MVP Scope
 
@@ -78,7 +94,7 @@ For a Windows-first local app:
 - Queue: local async worker with one active GPU job by default.
 - Media handling: FFmpeg for transcoding, thumbnails, metadata, and waveform/audio inspection later.
 
-Why this shape: Python already fits the AI tooling ecosystem, while React gives us a polished control surface quickly. Keeping ComfyUI as a managed sidecar avoids reimplementing rapidly moving video inference internals.
+Why this shape: Python already fits the AI tooling ecosystem, while React gives us a polished control surface quickly. Keeping ComfyUI as an optional managed sidecar avoids reimplementing rapidly moving video inference internals before we know which parts are worth owning directly.
 
 ## Engine Adapter Contract
 
@@ -91,6 +107,13 @@ Each model family should implement:
 - `streamProgress(jobId)`.
 - `collectOutputs(jobId)`.
 - `freeMemory(strategy)`.
+
+Initial adapters:
+
+- `ComfyWanAdapter`: submits generated API workflows to local ComfyUI.
+- `DirectWanAdapter`: planned spike using WAN's native inference code once baseline Comfy execution works.
+- `ComfyLtxAdapter`: planned LTX support through ComfyUI-LTXVideo and/or built-in Comfy LTX nodes.
+- `DirectLtxAdapter`: optional later spike if direct LTX pipelines provide better control/performance.
 
 Shared normalized settings:
 
@@ -150,16 +173,25 @@ The app should never edit a raw workflow by brittle string replacement. It shoul
 
 ### Performance
 
-- For 24 GB+ VRAM and known-good model placement.
+- Default profile for the RTX 5090 target machine.
+- For 32 GB VRAM and known-good model placement.
 - Prefer keeping models resident.
 - Avoid repeated unload/reload.
 - Useful for batches with same model and LoRA stack.
+- Prioritize WAN 2.2 14B FP8/distilled workflows when installed.
 
 ### Turbo
 
 - Requires compatible LightX2V distilled models or LoRAs.
 - Uses 4-step/low-step presets.
 - Shows a visible compatibility note because distilled speed changes quality and prompt behavior.
+
+### Experimental Max
+
+- RTX 5090-specific experimental profile.
+- Tests higher frame counts, higher resolutions, longer context, and model residency.
+- Can use local wheel builds or source builds when prebuilt packages lag Blackwell support.
+- Never becomes the default until measured stable.
 
 ## Model Library
 
@@ -234,6 +266,15 @@ Generate screen structure:
 - Read `/system_stats`, `/models`, and `/object_info`.
 - Submit one known WAN 5B workflow.
 - Stream progress and collect output.
+- Record exact VRAM usage and timing on RTX 5090.
+
+### Phase 1.5: Direct WAN Spike
+
+- Install WAN 2.2 native inference environment in an isolated project environment.
+- Verify PyTorch CUDA support on RTX 5090.
+- Run the smallest practical WAN 2.2 command-line generation.
+- Compare direct WAN vs ComfyUI on setup complexity, speed, memory behavior, LoRA handling, and output management.
+- Decide whether MVP execution should be Comfy-first, direct-first, or dual-backend.
 
 ### Phase 2: MVP UI
 
@@ -268,6 +309,5 @@ Generate screen structure:
 - App form: browser localhost first, or Tauri desktop from the beginning.
 - Whether the app should install/manage ComfyUI or only connect to an existing install.
 - GitHub visibility and license.
-- Target hardware baseline on your machine.
-- Whether first MVP should prioritize 5B reliability or 14B/turbo experimentation.
-
+- Whether first MVP should prioritize 14B/turbo on RTX 5090, with 5B as fallback.
+- Whether ComfyUI remains the primary runtime or becomes an import/export compatibility layer after the Direct WAN spike.
