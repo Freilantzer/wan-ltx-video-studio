@@ -103,7 +103,9 @@ On Windows, the runner also writes a `.windows-gpu-memory.jsonl` sidecar using `
 
 An 81-frame 1280x720 start-frame run with the 5B path completed all 8 sampling steps at about `24.1` GB dedicated VRAM, then VAE decode crossed the dedicated VRAM boundary and spilled into Windows shared GPU memory before the run was manually stopped. Conclusion: sampling fits, but full-frame VAE decode needs Comfy-style memory handling before 720p/81 can be considered supported.
 
-The first standalone mitigation is a streaming temporal VAE decode path for WAN 2.2. Immediately before VAE decode, the runner explicitly pushes the DiT and text encoder to CPU, synchronizes, runs GC, and clears CUDA cache. Instead of concatenating each decoded temporal chunk into a growing CUDA tensor, the runner decodes one latent-time chunk at a time, moves that decoded chunk to CPU, clears CUDA cache pressure, and concatenates the final video on CPU. After decode, it moves the VAE itself to CPU before video saving. This targets the 720p/81 failure mode where sampling fit in dedicated VRAM but VAE decode spilled into shared GPU memory.
+The first standalone mitigation is a streaming temporal VAE decode path for WAN 2.2. Immediately before VAE decode, the runner explicitly pushes the DiT and text encoder to CPU, synchronizes, runs GC, and clears CUDA cache. Instead of concatenating each decoded temporal chunk into a growing CUDA tensor, the runner decodes one latent-time chunk at a time, moves that decoded chunk to CPU, clears CUDA cache pressure, and concatenates the final video on CPU. After decode, it moves the VAE itself to CPU before video saving.
+
+Follow-up 81-frame 1280x720 test result: pre-VAE cleanup worked, dropping driver-used VRAM to about `3.5` GB before decode. Temporal streaming still failed at 720p because the VAE decoder's per-spatial-chunk activation cost crossed dedicated VRAM and spilled into shared GPU memory. The run reached about `31.1` GB dedicated plus `9.75` GB shared before it was stopped. Conclusion: temporal streaming is useful but insufficient; 720p/81 needs spatial tiled VAE decode or a Comfy-equivalent tiled VAE fallback.
 
 ## Next Slice
 
