@@ -69,6 +69,20 @@ The first executable direct render completed on the RTX 5090 with `wan22_ti2v_5b
 
 This proves the standalone runner can load the local WAN 5B fp16 diffusion model, UMT5 encoder, and WAN 2.2 VAE, then execute a complete segment without ComfyUI.
 
+## 5B Calibration Notes
+
+The 2-step smoke output is only a wiring test and should not be used to judge visual quality. A five-render calibration pass at `640x352`, `25` frames, `24` fps showed:
+
+| Run | Mode | Steps | Shift | Result |
+| --- | --- | ---: | ---: | --- |
+| `calib01` | start-frame I2V | 8 | 5 | recognizable and stable, mostly anchored to the source frame |
+| `calib02` | start-frame I2V | 16 | 3 | clean and stable, slightly more natural at low resolution |
+| `calib03` | text-only T2V | 16 | 5 | still under-formed and dark |
+| `calib04` | text-only T2V | 40 | 5 | coherent alley composition, but noticeably stylized |
+| `calib05` | start-frame I2V | 40 | 5 | best detail, but begins adding saturated light artifacts |
+
+Working conclusion: the direct 5B fp16 path is useful for backend validation and small previews, especially with a start frame. It is not the quality target. The production-quality path should focus on A14B high/low expert loading, Lightning/Turbo LoRA routing, and matching the known 720p Comfy reference.
+
 ## Next Slice
 
 The next backend slice is to harden the render path before enabling longer jobs:
