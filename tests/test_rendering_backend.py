@@ -11,7 +11,12 @@ from wan_ltx_studio.rendering import (
     get_renderer_profile,
     render_job_plan_to_payload,
 )
-from wan_ltx_studio.rendering.single_segment_runner import _convert_comfy_umt5_state_dict
+from wan_ltx_studio.rendering.single_segment_runner import (
+    _convert_comfy_umt5_state_dict,
+    _install_attention_fallback,
+    _normalize_wan22_vae_state_dict,
+    _reset_wan_rope_freqs,
+)
 
 
 class RenderingBackendTests(unittest.TestCase):
@@ -193,6 +198,71 @@ class RenderingBackendTests(unittest.TestCase):
         self.assertEqual(converted["blocks.0.ffn.fc1.weight"], sentinel)
         self.assertEqual(converted["blocks.0.ffn.fc2.weight"], sentinel)
         self.assertNotIn("spiece_model", converted)
+
+    def test_wan22_vae_keys_are_kept_for_official_class_layout(self):
+        sentinel = object()
+        state_dict = {
+            "encoder.downsamples.2.downsamples.2.time_conv.weight": sentinel,
+            "decoder.upsamples.0.upsamples.3.time_conv.weight": sentinel,
+        }
+
+        self.assertEqual(_normalize_wan22_vae_state_dict(state_dict), state_dict)
+
+    def test_rope_freq_reset_replaces_meta_placeholder(self):
+        class Config:
+            dim = 3072
+            num_heads = 24
+
+        class Model:
+            freqs = None
+
+        model = Model()
+        _reset_wan_rope_freqs(model, Config())
+
+        self.assertEqual(tuple(model.freqs.shape), (1024, 64))
+
+    def test_attention_fallback_installs_without_flash_attention(self):
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, str(Path("runtimes/direct-wan/src/Wan2.2").resolve()))
+        try:
+            import wan.modules.attention as attention_module
+            import wan.modules.model as model_module
+        except ModuleNotFoundError as exc:
+            self.skipTest(f"direct WAN runtime dependency unavailable: {exc}")
+
+        if attention_module.FLASH_ATTN_2_AVAILABLE or attention_module.FLASH_ATTN_3_AVAILABLE:
+            self.skipTest("flash attention is installed")
+
+        _install_attention_fallback()
+
+        self.assertIs(attention_module.flash_attention, model_module.flash_attention)
+
+        import torch
+
+        q = torch.randn(1, 4, 2, 3)
+        k = torch.randn(1, 4, 2, 3)
+        v = torch.randn(1, 4, 2, 3)
+        out = attention_module.flash_attention(
+            q,
+            k,
+            v,
+            k_lens=torch.tensor([2]),
+            dtype=torch.float32,
+        )
+        self.assertEqual(tuple(out.shape), (1, 4, 2, 3))
+        self.assertTrue(torch.isfinite(out).all())
+
+        trimmed_out = attention_module.flash_attention(
+            q,
+            k,
+            v,
+            q_lens=torch.tensor([3]),
+            k_lens=torch.tensor([2]),
+            dtype=torch.float32,
+        )
+        self.assertTrue(torch.equal(trimmed_out[:, 3:], torch.zeros_like(trimmed_out[:, 3:])))
 
 
 if __name__ == "__main__":

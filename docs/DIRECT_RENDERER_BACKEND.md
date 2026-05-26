@@ -52,13 +52,30 @@ The current planned allocator matches the working reference script:
 PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True
 ```
 
+## First GPU Smoke Result
+
+The first executable direct render completed on the RTX 5090 with `wan22_ti2v_5b_fp16`:
+
+- command profile: `wan22_ti2v_5b_fp16`
+- prompt-only TI2V smoke render, no start image
+- size: `640x352`
+- frames: `25`
+- fps: `24`
+- sampling: `2` steps, shift `5`, guide scale `5`
+- elapsed: `17.202` seconds
+- peak allocated VRAM: `12.182` GB
+- peak reserved VRAM: `17.26` GB
+- output: `renders/smoke_ti2v_5b_640x352_25f_2steps.mp4`
+
+This proves the standalone runner can load the local WAN 5B fp16 diffusion model, UMT5 encoder, and WAN 2.2 VAE, then execute a complete segment without ComfyUI.
+
 ## Next Slice
 
-The next backend slice is the measured GPU smoke test:
+The next backend slice is to harden the render path before enabling longer jobs:
 
-- run one short `wan22_ti2v_5b_fp16` segment through the direct runner
-- record peak allocated/reserved VRAM and output metadata
-- use that result to harden cancellation/progress before enabling longer jobs
+- stream progress and cancellation state into the local API
+- surface render lock state in the UI
+- install or build a proper compiled attention kernel for the production runtime
 - then implement A14B FP8 linear support and high/low expert loading
 - apply profile LoRAs to the correct high/low expert only
 - compare A14B 720p output duration, frame count, and VRAM against the 25 GB reference before enabling multi-segment rendering

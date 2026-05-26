@@ -102,6 +102,7 @@ def _run_ti2v_5b_segment(
     import torch
     from PIL import Image
     from safetensors.torch import load_file
+    from easydict import EasyDict
     from wan.configs import WAN_CONFIGS
     from wan.modules.model import WanModel
     from wan.modules.t5 import T5EncoderModel
@@ -112,10 +113,11 @@ def _run_ti2v_5b_segment(
     if not torch.cuda.is_available():
         raise SegmentRunnerError("CUDA is not available")
 
+    _install_attention_fallback()
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.empty_cache()
 
-    cfg = WAN_CONFIGS["ti2v-5B"].copy()
+    cfg = EasyDict(WAN_CONFIGS["ti2v-5B"])
     cfg.t5_checkpoint = str(components["text_encoder"])
     cfg.vae_checkpoint = str(components["vae"])
     cfg.t5_dtype = torch.float16
@@ -216,7 +218,112 @@ def _load_ti2v_model(model_cls, cfg, path: Path):
     missing, unexpected = model.load_state_dict(state_dict, assign=True, strict=False)
     if missing or unexpected:
         raise SegmentRunnerError(f"TI2V model load mismatch: missing={missing}, unexpected={unexpected}")
+    _reset_wan_rope_freqs(model, cfg)
     return model.eval().requires_grad_(False)
+
+
+def _reset_wan_rope_freqs(model, cfg) -> None:
+    import torch
+
+    head_dim = cfg.dim // cfg.num_heads
+    model.freqs = torch.cat(
+        [
+            _rope_params(1024, head_dim - 4 * (head_dim // 6)),
+            _rope_params(1024, 2 * (head_dim // 6)),
+            _rope_params(1024, 2 * (head_dim // 6)),
+        ],
+        dim=1,
+    )
+
+
+def _rope_params(max_seq_len: int, dim: int, theta: int = 10000):
+    import torch
+
+    if dim % 2 != 0:
+        raise SegmentRunnerError(f"RoPE dimension must be even, got {dim}")
+    freqs = torch.outer(
+        torch.arange(max_seq_len),
+        1.0 / torch.pow(theta, torch.arange(0, dim, 2).to(torch.float64).div(dim)),
+    )
+    return torch.polar(torch.ones_like(freqs), freqs)
+
+
+def _install_attention_fallback() -> None:
+    import torch
+    import wan.modules.attention as attention_module
+    import wan.modules.model as model_module
+
+    if attention_module.FLASH_ATTN_2_AVAILABLE or attention_module.FLASH_ATTN_3_AVAILABLE:
+        return
+
+    def sdpa_flash_attention_fallback(
+        q,
+        k,
+        v,
+        q_lens=None,
+        k_lens=None,
+        dropout_p=0.0,
+        softmax_scale=None,
+        q_scale=None,
+        causal=False,
+        window_size=(-1, -1),
+        deterministic=False,
+        dtype=torch.bfloat16,
+        version=None,
+    ):
+        del window_size, deterministic, version
+        out_dtype = q.dtype
+
+        def lens_values(lens, batch_size: int, fallback: int) -> list[int]:
+            if lens is None:
+                return [fallback] * batch_size
+            if isinstance(lens, int):
+                return [lens] * batch_size
+            if hasattr(lens, "detach"):
+                values = [int(item) for item in lens.detach().cpu().tolist()]
+            else:
+                values = [int(item) for item in lens]
+            if len(values) != batch_size:
+                raise SegmentRunnerError(
+                    f"attention length metadata has {len(values)} items for batch size {batch_size}"
+                )
+            return values
+
+        if q_scale is not None:
+            q = q * q_scale
+
+        half_dtypes = (torch.float16, torch.bfloat16)
+        work_dtype = q.dtype if q.dtype in half_dtypes else dtype
+        q = q.to(work_dtype)
+        k = k.to(work_dtype)
+        v = v.to(work_dtype if v.dtype not in half_dtypes else v.dtype)
+        q = q.to(v.dtype)
+        k = k.to(v.dtype)
+
+        batch_size, query_len = q.shape[:2]
+        key_len = k.shape[1]
+        q_lengths = lens_values(q_lens, batch_size, query_len)
+        k_lengths = lens_values(k_lens, batch_size, key_len)
+        out = v.new_zeros(batch_size, query_len, q.shape[2], v.shape[-1])
+
+        for batch_index, (current_q_len, current_k_len) in enumerate(zip(q_lengths, k_lengths)):
+            current_q = q[batch_index : batch_index + 1, :current_q_len].transpose(1, 2)
+            current_k = k[batch_index : batch_index + 1, :current_k_len].transpose(1, 2)
+            current_v = v[batch_index : batch_index + 1, :current_k_len].transpose(1, 2)
+            current_out = torch.nn.functional.scaled_dot_product_attention(
+                current_q,
+                current_k,
+                current_v,
+                dropout_p=dropout_p,
+                is_causal=causal,
+                scale=softmax_scale,
+            )
+            out[batch_index : batch_index + 1, :current_q_len] = current_out.transpose(1, 2)
+
+        return out.to(out_dtype).contiguous()
+
+    attention_module.flash_attention = sdpa_flash_attention_fallback
+    model_module.flash_attention = sdpa_flash_attention_fallback
 
 
 def _load_wan22_vae(vae_cls, path: Path, device):
@@ -319,13 +426,7 @@ def _convert_comfy_umt5_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]
 
 
 def _normalize_wan22_vae_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
-    replacements = {
-        "encoder.downsamples.2.downsamples.2.time_conv.weight": "encoder.downsamples.0.downsamples.2.time_conv.weight",
-        "encoder.downsamples.2.downsamples.2.time_conv.bias": "encoder.downsamples.0.downsamples.2.time_conv.bias",
-        "decoder.upsamples.0.upsamples.3.time_conv.weight": "decoder.upsamples.2.upsamples.3.time_conv.weight",
-        "decoder.upsamples.0.upsamples.3.time_conv.bias": "decoder.upsamples.2.upsamples.3.time_conv.bias",
-    }
-    return {replacements.get(key, key): value for key, value in state_dict.items()}
+    return state_dict
 
 
 @contextmanager
