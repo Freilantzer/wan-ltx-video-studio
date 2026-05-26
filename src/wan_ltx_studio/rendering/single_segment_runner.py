@@ -15,6 +15,9 @@ from wan_ltx_studio.rendering.profiles import get_renderer_profile
 from wan_ltx_studio.rendering.runner_config import SegmentRunnerConfig
 
 
+MEANINGFUL_TEST_FRAME_COUNT = 81
+
+
 class SegmentRunnerError(RuntimeError):
     """Raised when direct segment execution fails."""
 
@@ -58,6 +61,9 @@ def run_segment(config: SegmentRunnerConfig) -> dict[str, Any]:
         "outputPath": str(Path(config.output_path).resolve()),
         "config": asdict(config),
     }
+    warnings = _runner_warnings(config)
+    if warnings:
+        payload["warnings"] = warnings
 
     if profile.id != "wan22_ti2v_5b_fp16":
         raise SegmentRunnerError(
@@ -116,6 +122,8 @@ def _run_ti2v_5b_segment(
     _install_attention_fallback()
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.empty_cache()
+    telemetry = _CudaMemoryTelemetry(torch)
+    telemetry.mark("cuda_ready", {"profileId": config.profile_id})
 
     cfg = EasyDict(WAN_CONFIGS["ti2v-5B"])
     cfg.t5_checkpoint = str(components["text_encoder"])
@@ -138,12 +146,30 @@ def _run_ti2v_5b_segment(
     pipeline.patch_size = cfg.patch_size
     pipeline.sp_size = 1
     pipeline.sample_neg_prompt = cfg.sample_neg_prompt
+    telemetry.mark(
+        "pipeline_shell_created",
+        {
+            "frameNum": config.frame_num,
+            "width": config.width,
+            "height": config.height,
+            "sampleSteps": config.sample_steps,
+        },
+    )
 
     pipeline.text_encoder = _load_wan_t5_encoder(T5EncoderModel, cfg, components["text_encoder"])
+    telemetry.mark("text_encoder_loaded_cpu")
     pipeline.vae = _load_wan22_vae(Wan2_2_VAE, components["vae"], pipeline.device)
+    telemetry.mark("vae_loaded_cuda")
     pipeline.model = _load_ti2v_model(WanModel, cfg, components["dit"])
+    telemetry.mark("dit_loaded_cpu")
+    _install_component_memory_hooks(pipeline, telemetry, expected_dit_forwards=config.sample_steps * 2)
 
     img = Image.open(config.start_image).convert("RGB") if config.start_image else None
+    telemetry.mark(
+        "start_image_loaded_cpu" if img is not None else "no_start_image",
+        {"startImage": config.start_image},
+    )
+    telemetry.mark("before_generate", synchronize=True)
     video = pipeline.generate(
         config.prompt,
         img=img,
@@ -158,9 +184,11 @@ def _run_ti2v_5b_segment(
         seed=-1 if config.seed is None else config.seed,
         offload_model=config.offload_model,
     )
+    telemetry.mark("after_generate", synchronize=True)
 
     output_path = Path(config.output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    telemetry.mark("before_save_video")
     save_video(
         tensor=video[None],
         save_file=str(output_path),
@@ -169,26 +197,185 @@ def _run_ti2v_5b_segment(
         normalize=True,
         value_range=(-1, 1),
     )
+    telemetry.mark("after_save_video", {"outputPath": str(output_path), "outputBytes": output_path.stat().st_size})
 
-    peak_allocated = torch.cuda.max_memory_allocated()
-    peak_reserved = torch.cuda.max_memory_reserved()
-    current_allocated = torch.cuda.memory_allocated()
-    current_reserved = torch.cuda.memory_reserved()
-
+    telemetry.mark("before_cleanup", synchronize=True)
     del video, pipeline
     gc.collect()
     torch.cuda.empty_cache()
     torch.cuda.synchronize()
+    telemetry.mark("after_cleanup", synchronize=True)
 
-    return {
-        "peakAllocatedBytes": peak_allocated,
-        "peakReservedBytes": peak_reserved,
-        "currentAllocatedBytes": current_allocated,
-        "currentReservedBytes": current_reserved,
-        "peakAllocatedGb": round(peak_allocated / 1024**3, 3),
-        "peakReservedGb": round(peak_reserved / 1024**3, 3),
-        "outputBytes": output_path.stat().st_size if output_path.exists() else None,
-    }
+    summary = telemetry.summary()
+    summary["outputBytes"] = output_path.stat().st_size if output_path.exists() else None
+    return summary
+
+
+class _CudaMemoryTelemetry:
+    def __init__(self, torch_module):
+        self.torch = torch_module
+        self.started = time.perf_counter()
+        self.stages: list[dict[str, Any]] = []
+
+    def mark(
+        self,
+        stage: str,
+        detail: dict[str, Any] | None = None,
+        *,
+        synchronize: bool = False,
+    ) -> dict[str, Any]:
+        cuda = self.torch.cuda
+        if synchronize:
+            cuda.synchronize()
+
+        allocated = cuda.memory_allocated()
+        reserved = cuda.memory_reserved()
+        peak_allocated = cuda.max_memory_allocated()
+        peak_reserved = cuda.max_memory_reserved()
+        snapshot: dict[str, Any] = {
+            "stage": stage,
+            "elapsedSeconds": round(time.perf_counter() - self.started, 3),
+            "allocatedBytes": allocated,
+            "reservedBytes": reserved,
+            "peakAllocatedBytes": peak_allocated,
+            "peakReservedBytes": peak_reserved,
+            "allocatedGb": _bytes_to_gb(allocated),
+            "reservedGb": _bytes_to_gb(reserved),
+            "peakAllocatedGb": _bytes_to_gb(peak_allocated),
+            "peakReservedGb": _bytes_to_gb(peak_reserved),
+        }
+        driver_snapshot = self._driver_memory_snapshot()
+        if driver_snapshot:
+            snapshot.update(driver_snapshot)
+        if detail:
+            snapshot["detail"] = detail
+        self.stages.append(snapshot)
+        return snapshot
+
+    def summary(self) -> dict[str, Any]:
+        cuda = self.torch.cuda
+        current_allocated = cuda.memory_allocated()
+        current_reserved = cuda.memory_reserved()
+        peak_allocated = cuda.max_memory_allocated()
+        peak_reserved = cuda.max_memory_reserved()
+        driver_peaks = [stage.get("driverUsedBytes") for stage in self.stages if stage.get("driverUsedBytes") is not None]
+        summary: dict[str, Any] = {
+            "peakAllocatedBytes": peak_allocated,
+            "peakReservedBytes": peak_reserved,
+            "currentAllocatedBytes": current_allocated,
+            "currentReservedBytes": current_reserved,
+            "peakAllocatedGb": _bytes_to_gb(peak_allocated),
+            "peakReservedGb": _bytes_to_gb(peak_reserved),
+            "currentAllocatedGb": _bytes_to_gb(current_allocated),
+            "currentReservedGb": _bytes_to_gb(current_reserved),
+            "stages": self.stages,
+        }
+        if driver_peaks:
+            peak_driver = max(driver_peaks)
+            summary["peakDriverUsedBytes"] = peak_driver
+            summary["peakDriverUsedGb"] = _bytes_to_gb(peak_driver)
+        return summary
+
+    def _driver_memory_snapshot(self) -> dict[str, Any]:
+        try:
+            free_bytes, total_bytes = self.torch.cuda.mem_get_info()
+        except (AttributeError, RuntimeError):
+            return {}
+
+        used_bytes = total_bytes - free_bytes
+        return {
+            "driverFreeBytes": free_bytes,
+            "driverTotalBytes": total_bytes,
+            "driverUsedBytes": used_bytes,
+            "driverFreeGb": _bytes_to_gb(free_bytes),
+            "driverTotalGb": _bytes_to_gb(total_bytes),
+            "driverUsedGb": _bytes_to_gb(used_bytes),
+        }
+
+
+def _bytes_to_gb(value: int | float) -> float:
+    return round(float(value) / 1024**3, 3)
+
+
+def _runner_warnings(config: SegmentRunnerConfig) -> list[str]:
+    warnings = []
+    if config.frame_num != MEANINGFUL_TEST_FRAME_COUNT:
+        warnings.append(
+            f"{config.frame_num} frames is a smoke/preview run; use {MEANINGFUL_TEST_FRAME_COUNT} frames for meaningful WAN calibration."
+        )
+    return warnings
+
+
+def _install_component_memory_hooks(pipeline, telemetry: _CudaMemoryTelemetry, expected_dit_forwards: int) -> None:
+    _wrap_method(pipeline.text_encoder.model, "to", telemetry, "text_encoder_to_device")
+    _wrap_method(pipeline.text_encoder.model, "cpu", telemetry, "text_encoder_to_cpu")
+    _wrap_counted_method(
+        pipeline.text_encoder.model,
+        "forward",
+        telemetry,
+        "text_encoder_forward",
+        expected_calls=2,
+        mark_every=1,
+    )
+    _wrap_method(pipeline.vae, "encode", telemetry, "vae_encode")
+    _wrap_method(pipeline.vae, "decode", telemetry, "vae_decode")
+    _wrap_method(pipeline.model, "to", telemetry, "dit_to_device")
+    _wrap_method(pipeline.model, "cpu", telemetry, "dit_to_cpu")
+    _wrap_counted_method(
+        pipeline.model,
+        "forward",
+        telemetry,
+        "dit_forward",
+        expected_calls=expected_dit_forwards,
+        mark_every=10,
+    )
+
+
+def _wrap_method(target, method_name: str, telemetry: _CudaMemoryTelemetry, stage: str) -> None:
+    original = getattr(target, method_name)
+
+    def wrapped(*args, **kwargs):
+        telemetry.mark(f"{stage}_start")
+        result = original(*args, **kwargs)
+        telemetry.mark(f"{stage}_end", synchronize=True)
+        return result
+
+    setattr(target, method_name, wrapped)
+
+
+def _wrap_counted_method(
+    target,
+    method_name: str,
+    telemetry: _CudaMemoryTelemetry,
+    stage: str,
+    *,
+    expected_calls: int,
+    mark_every: int,
+) -> None:
+    original = getattr(target, method_name)
+    state = {"calls": 0}
+
+    def should_mark(call_index: int) -> bool:
+        return call_index <= 2 or call_index == expected_calls or call_index % mark_every == 0
+
+    def wrapped(*args, **kwargs):
+        state["calls"] += 1
+        call_index = state["calls"]
+        if should_mark(call_index):
+            telemetry.mark(
+                f"{stage}_start",
+                {"call": call_index, "expectedCalls": expected_calls},
+            )
+        result = original(*args, **kwargs)
+        if should_mark(call_index):
+            telemetry.mark(
+                f"{stage}_end",
+                {"call": call_index, "expectedCalls": expected_calls},
+                synchronize=True,
+            )
+        return result
+
+    setattr(target, method_name, wrapped)
 
 
 def _load_ti2v_model(model_cls, cfg, path: Path):

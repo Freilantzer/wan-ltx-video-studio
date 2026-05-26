@@ -83,12 +83,27 @@ The 2-step smoke output is only a wiring test and should not be used to judge vi
 
 Working conclusion: the direct 5B fp16 path is useful for backend validation and small previews, especially with a start frame. It is not the quality target. The production-quality path should focus on A14B high/low expert loading, Lightning/Turbo LoRA routing, and matching the known 720p Comfy reference.
 
+Meaningful WAN calibration runs should use `81` frames. Shorter runs are allowed as smoke tests, but the runner marks them with a warning in the JSON payload so they are not mistaken for quality measurements.
+
+## Memory Telemetry
+
+The direct runner emits staged CUDA memory snapshots under `telemetry.stages`. Each snapshot includes:
+
+- current PyTorch allocated/reserved VRAM
+- peak PyTorch allocated/reserved VRAM so far
+- driver-level free/total/used VRAM from `torch.cuda.mem_get_info()` when available
+- elapsed seconds since the runner entered GPU execution
+- optional stage details such as component name or DiT forward call count
+
+The current staged checkpoints cover CUDA setup, pipeline shell creation, text encoder load and forward calls, VAE load/encode/decode, DiT CPU load, DiT transfer to/from CUDA, selected DiT sampling forward calls, save, and cleanup. The top-level `peakAllocatedGb`, `peakReservedGb`, and `peakDriverUsedGb` fields remain as compact summary values.
+
 ## Next Slice
 
 The next backend slice is to harden the render path before enabling longer jobs:
 
 - stream progress and cancellation state into the local API
 - surface render lock state in the UI
+- surface staged VRAM telemetry in the UI/API render details
 - install or build a proper compiled attention kernel for the production runtime
 - then implement A14B FP8 linear support and high/low expert loading
 - apply profile LoRAs to the correct high/low expert only

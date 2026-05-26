@@ -12,11 +12,14 @@ from wan_ltx_studio.rendering import (
     render_job_plan_to_payload,
 )
 from wan_ltx_studio.rendering.single_segment_runner import (
+    _CudaMemoryTelemetry,
     _convert_comfy_umt5_state_dict,
     _install_attention_fallback,
     _normalize_wan22_vae_state_dict,
     _reset_wan_rope_freqs,
+    _runner_warnings,
 )
+from wan_ltx_studio.rendering.runner_config import SegmentRunnerConfig
 
 
 class RenderingBackendTests(unittest.TestCase):
@@ -123,6 +126,88 @@ class RenderingBackendTests(unittest.TestCase):
         self.assertIn("single_segment_runner", " ".join(command))
         self.assertIn("--dry-run", command)
         self.assertNotIn("--allow-gpu", command)
+
+    def test_runner_warns_when_calibration_frame_count_is_not_81(self):
+        config = SegmentRunnerConfig(
+            profile_id="wan22_ti2v_5b_fp16",
+            prompt="test",
+            negative_prompt="",
+            width=640,
+            height=352,
+            frame_num=25,
+            fps=24.0,
+            seed=1,
+            start_image=None,
+            output_path="renders/test.mp4",
+            model_root="models",
+            runtime_root="runtimes/direct-wan/src/Wan2.2",
+            sample_steps=2,
+            sample_shift=5.0,
+            sample_guide_scale=5.0,
+        )
+
+        self.assertIn("use 81 frames", _runner_warnings(config)[0])
+
+        meaningful_config = SegmentRunnerConfig(
+            profile_id=config.profile_id,
+            prompt=config.prompt,
+            negative_prompt=config.negative_prompt,
+            width=config.width,
+            height=config.height,
+            frame_num=81,
+            fps=config.fps,
+            seed=config.seed,
+            start_image=config.start_image,
+            output_path=config.output_path,
+            model_root=config.model_root,
+            runtime_root=config.runtime_root,
+            sample_steps=config.sample_steps,
+            sample_shift=config.sample_shift,
+            sample_guide_scale=config.sample_guide_scale,
+        )
+        self.assertEqual(_runner_warnings(meaningful_config), [])
+
+    def test_cuda_memory_telemetry_records_stage_snapshots(self):
+        class FakeCuda:
+            def __init__(self):
+                self.allocated = 1024**3
+                self.reserved = 2 * 1024**3
+                self.total = 32 * 1024**3
+
+            def synchronize(self):
+                return None
+
+            def memory_allocated(self):
+                return self.allocated
+
+            def memory_reserved(self):
+                return self.reserved
+
+            def max_memory_allocated(self):
+                return 3 * 1024**3
+
+            def max_memory_reserved(self):
+                return 4 * 1024**3
+
+            def mem_get_info(self):
+                return self.total - (5 * 1024**3), self.total
+
+        class FakeTorch:
+            cuda = FakeCuda()
+
+        telemetry = _CudaMemoryTelemetry(FakeTorch)
+        snapshot = telemetry.mark("after_load", {"component": "test"}, synchronize=True)
+        summary = telemetry.summary()
+
+        self.assertEqual(snapshot["stage"], "after_load")
+        self.assertEqual(snapshot["allocatedGb"], 1.0)
+        self.assertEqual(snapshot["reservedGb"], 2.0)
+        self.assertEqual(snapshot["driverUsedGb"], 5.0)
+        self.assertEqual(snapshot["detail"]["component"], "test")
+        self.assertEqual(summary["peakAllocatedGb"], 3.0)
+        self.assertEqual(summary["peakReservedGb"], 4.0)
+        self.assertEqual(summary["peakDriverUsedGb"], 5.0)
+        self.assertEqual(summary["stages"][0]["stage"], "after_load")
 
     def test_non_executable_profile_cannot_build_runner_command(self):
         job = build_render_job_plan(
