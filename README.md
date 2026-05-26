@@ -7,15 +7,19 @@ The goal is not to recreate a node graph UI. The app should expose a focused, po
 ## Current Status
 
 - Local project folder created at `D:\VIDEO_GENS\wan-ltx-video-studio`.
-- Git repository initialized locally.
-- Planning docs created under `docs/`.
-- No GitHub remote has been created yet.
+- Git repository initialized and pushed to GitHub.
+- Planning docs and architecture decisions created under `docs/`.
+- Local model library mapped under `models/` and ignored by git.
+- First app-owned planning code added under `src/`.
 
 ## Project Docs
 
 - [App plan](docs/APP_PLAN.md)
+- [Architecture decisions](docs/ARCHITECTURE_DECISIONS.md)
+- [Chunked video planner](docs/CHUNKED_VIDEO_PLANNER.md)
 - [Research notes](docs/RESEARCH_NOTES.md)
-- [GitHub setup](docs/GITHUB_SETUP.md)
+- [Reference workflow analysis](docs/REFERENCE_WORKFLOW_ANALYSIS.md)
+- [Read-only Comfy reference install](docs/READ_ONLY_COMFY_REFERENCE_INSTALL.md)
 
 ## Working Product Direction
 
@@ -28,16 +32,13 @@ Build a desktop or local web app with:
 - Queue, batch, prompt versioning, seed management, previews, and render history.
 - A model/provider abstraction so LTX 2.x/2.3 can be added without rebuilding the UI.
 
-## What I Need From You For GitHub
+## Development
 
-To publish this as a GitHub project, I need:
+Run the current dependency-free tests with:
 
-1. Repository name, unless `wan-ltx-video-studio` is okay.
-2. Visibility: private or public.
-3. License preference for our app code, or confirmation to leave it unlicensed for now.
-4. GitHub auth path:
-   - Install and authenticate GitHub CLI (`gh auth login`), or
-   - Create an empty repo on GitHub and give me the remote URL.
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+python -m unittest discover -s tests
+```
 
-`gh` is not currently installed on this machine, so I cannot create the GitHub repo from the terminal yet.
-
+The current code does not start ComfyUI or load models. It only plans segment timelines.

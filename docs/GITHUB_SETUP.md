@@ -8,41 +8,38 @@ Local folder:
 D:\VIDEO_GENS\wan-ltx-video-studio
 ```
 
-The repository has been initialized locally with Git. The default branch should be renamed to `main` before the first commit if it is not already.
+The repository has been initialized locally with Git and pushed to GitHub.
 
-## Needed From You
+Remote:
 
-To publish this to GitHub, choose:
+```text
+git@github.com:Freilantzer/wan-ltx-video-studio.git
+```
+
+Current setup:
 
 - Repo name: recommended `wan-ltx-video-studio`
-- Visibility: `private` while planning, unless you already want it public
-- License: recommended `MIT` for the app code, but we must keep model licenses separate
+- Owner: `Freilantzer`
+- Visibility: private
+- Default branch: `main`
+- License: not selected yet
+
+## Auth
+
+SSH auth is configured for this repository.
+
+Useful commands:
+
+```powershell
+git status --short --branch
+git pull --ff-only
+git push
+```
+
+## Future Choices
+
+- License: recommended MIT for the app code if this becomes public, while keeping model licenses separate.
 - Description: `Local-first WAN 2.2 video generation studio with future LTX support`
-
-## Auth Options
-
-### Option A: GitHub CLI
-
-Install GitHub CLI, then run:
-
-```powershell
-gh auth login
-```
-
-After that I can create and push:
-
-```powershell
-gh repo create wan-ltx-video-studio --private --source . --remote origin --push
-```
-
-### Option B: Existing Remote URL
-
-Create an empty repo on GitHub, then give me the HTTPS or SSH URL. I can add it:
-
-```powershell
-git remote add origin <repo-url>
-git push -u origin main
-```
 
 ## Important Repo Rules
 
@@ -55,4 +52,3 @@ Do not commit:
 - Local machine paths containing secrets
 
 The `.gitignore` is configured for those already.
-
