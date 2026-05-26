@@ -16,6 +16,7 @@ from wan_ltx_studio.rendering.single_segment_runner import (
     _convert_comfy_umt5_state_dict,
     _install_attention_fallback,
     _normalize_wan22_vae_state_dict,
+    _parse_typeperf_gpu_memory_sample,
     _reset_wan_rope_freqs,
     _runner_warnings,
 )
@@ -214,6 +215,21 @@ class RenderingBackendTests(unittest.TestCase):
         self.assertEqual(summary["telemetryPath"], str(telemetry_path.resolve()))
         self.assertEqual(len(sidecar_lines), 1)
         self.assertIn('"stage": "after_load"', sidecar_lines[0])
+
+    def test_typeperf_gpu_memory_parser_sums_windows_dedicated_and_shared_usage(self):
+        output = "\n".join(
+            [
+                '"(PDH-CSV 4.0)","\\\\HOST\\GPU Adapter Memory(luid_a)\\Dedicated Usage","\\\\HOST\\GPU Adapter Memory(luid_b)\\Dedicated Usage","\\\\HOST\\GPU Adapter Memory(luid_a)\\Shared Usage","\\\\HOST\\GPU Adapter Memory(luid_b)\\Shared Usage","\\\\HOST\\GPU Adapter Memory(luid_a)\\Total Committed","\\\\HOST\\GPU Adapter Memory(luid_b)\\Total Committed"',
+                '"05/26/2026 19:02:23.712","1073741824.000000","2147483648.000000","536870912.000000","268435456.000000","1610612736.000000","2415919104.000000"',
+                "Exiting, please wait...",
+            ]
+        )
+
+        parsed = _parse_typeperf_gpu_memory_sample(output)
+
+        self.assertEqual(parsed["windowsDedicatedUsageGb"], 3.0)
+        self.assertEqual(parsed["windowsSharedUsageGb"], 0.75)
+        self.assertEqual(parsed["windowsTotalCommittedGb"], 3.75)
 
     def test_non_executable_profile_cannot_build_runner_command(self):
         job = build_render_job_plan(

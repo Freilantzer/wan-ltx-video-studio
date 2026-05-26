@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import gc
 import json
 import os
+import platform
+import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -121,12 +125,58 @@ def _run_ti2v_5b_segment(
 
     output_path = Path(config.output_path).resolve()
     telemetry_path = output_path.with_suffix(".telemetry.jsonl")
+    windows_gpu_memory_path = output_path.with_suffix(".windows-gpu-memory.jsonl")
+    windows_gpu_monitor = _WindowsGpuMemoryMonitor(windows_gpu_memory_path)
 
+    windows_gpu_monitor.start()
+    try:
+        return _run_ti2v_5b_segment_inner(
+            config,
+            components,
+            output_path,
+            telemetry_path,
+            windows_gpu_memory_path,
+            torch,
+            Image,
+            EasyDict,
+            WAN_CONFIGS,
+            WanModel,
+            T5EncoderModel,
+            Wan2_2_VAE,
+            WanTI2V,
+            save_video,
+        )
+    finally:
+        windows_gpu_monitor.stop()
+
+
+def _run_ti2v_5b_segment_inner(
+    config: SegmentRunnerConfig,
+    components: dict[str, Path],
+    output_path: Path,
+    telemetry_path: Path,
+    windows_gpu_memory_path: Path,
+    torch,
+    Image,
+    EasyDict,
+    WAN_CONFIGS,
+    WanModel,
+    T5EncoderModel,
+    Wan2_2_VAE,
+    WanTI2V,
+    save_video,
+) -> dict[str, Any]:
     _install_attention_fallback()
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.empty_cache()
     telemetry = _CudaMemoryTelemetry(torch, telemetry_path)
-    telemetry.mark("cuda_ready", {"profileId": config.profile_id})
+    telemetry.mark(
+        "cuda_ready",
+        {
+            "profileId": config.profile_id,
+            "windowsGpuMemoryPath": str(windows_gpu_memory_path),
+        },
+    )
 
     cfg = EasyDict(WAN_CONFIGS["ti2v-5B"])
     cfg.t5_checkpoint = str(components["text_encoder"])
@@ -211,6 +261,7 @@ def _run_ti2v_5b_segment(
     summary = telemetry.summary()
     summary["outputBytes"] = output_path.stat().st_size if output_path.exists() else None
     summary["telemetryPath"] = str(telemetry_path)
+    summary["windowsGpuMemoryPath"] = str(windows_gpu_memory_path)
     return summary
 
 
@@ -311,6 +362,125 @@ class _CudaMemoryTelemetry:
 
 def _bytes_to_gb(value: int | float) -> float:
     return round(float(value) / 1024**3, 3)
+
+
+class _WindowsGpuMemoryMonitor:
+    COUNTERS = (
+        r"\GPU Adapter Memory(*)\Dedicated Usage",
+        r"\GPU Adapter Memory(*)\Shared Usage",
+        r"\GPU Adapter Memory(*)\Total Committed",
+    )
+
+    def __init__(self, output_path: str | Path, interval_seconds: float = 1.0):
+        self.output_path = Path(output_path).resolve()
+        self.interval_seconds = interval_seconds
+        self.started = time.perf_counter()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if platform.system() != "Windows":
+            return
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.output_path.write_text("", encoding="utf-8")
+        self._thread = threading.Thread(target=self._run, name="windows-gpu-memory-monitor", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=3)
+
+    def _run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                sample = _sample_windows_gpu_memory_once(self.COUNTERS)
+                sample["elapsedSeconds"] = round(time.perf_counter() - self.started, 3)
+                sample["source"] = "typeperf"
+                with self.output_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(sample, sort_keys=True) + "\n")
+            except Exception as exc:
+                with self.output_path.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        json.dumps(
+                            {
+                                "elapsedSeconds": round(time.perf_counter() - self.started, 3),
+                                "error": str(exc),
+                                "source": "typeperf",
+                            },
+                            sort_keys=True,
+                        )
+                        + "\n"
+                    )
+                return
+            self._stop_event.wait(self.interval_seconds)
+
+
+def _sample_windows_gpu_memory_once(counters: tuple[str, ...]) -> dict[str, Any]:
+    result = subprocess.run(
+        ["typeperf", *counters, "-sc", "1"],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return _parse_typeperf_gpu_memory_sample(result.stdout)
+
+
+def _parse_typeperf_gpu_memory_sample(output: str) -> dict[str, Any]:
+    rows = [row for row in csv.reader(output.splitlines()) if row]
+    header_index = next(
+        (index for index, row in enumerate(rows) if row[0].startswith("(PDH-CSV")),
+        None,
+    )
+    if header_index is None:
+        raise SegmentRunnerError("typeperf GPU memory output did not include a PDH header")
+
+    header = rows[header_index]
+    data = next(
+        (row for row in rows[header_index + 1 :] if len(row) == len(header) and _looks_like_typeperf_data_row(row)),
+        None,
+    )
+    if data is None:
+        raise SegmentRunnerError("typeperf GPU memory output did not include a data row")
+
+    dedicated = 0.0
+    shared = 0.0
+    committed = 0.0
+    for name, raw_value in zip(header[1:], data[1:]):
+        try:
+            value = float(raw_value)
+        except ValueError:
+            continue
+        if name.endswith(r"\Dedicated Usage"):
+            dedicated += value
+        elif name.endswith(r"\Shared Usage"):
+            shared += value
+        elif name.endswith(r"\Total Committed"):
+            committed += value
+
+    return {
+        "timestamp": data[0],
+        "windowsDedicatedUsageBytes": int(dedicated),
+        "windowsSharedUsageBytes": int(shared),
+        "windowsTotalCommittedBytes": int(committed),
+        "windowsDedicatedUsageGb": _bytes_to_gb(dedicated),
+        "windowsSharedUsageGb": _bytes_to_gb(shared),
+        "windowsTotalCommittedGb": _bytes_to_gb(committed),
+    }
+
+
+def _looks_like_typeperf_data_row(row: list[str]) -> bool:
+    return len(row) > 1 and any(_is_float(value) for value in row[1:])
+
+
+def _is_float(value: str) -> bool:
+    try:
+        float(value)
+        return True
+    except ValueError:
+        return False
 
 
 def _runner_warnings(config: SegmentRunnerConfig) -> list[str]:
