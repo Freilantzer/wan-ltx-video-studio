@@ -217,6 +217,53 @@ Summary:
 - ComfyUI-GGUF exposes the four WAN A14B Q8 files through `/models/unet_gguf` and `UnetLoaderGGUF`.
 - The copied LTX `.gguf` checkpoint is present on disk but not visible through `/models/checkpoints`; validate it later with the LTX adapter path.
 
+## First Real Generation Test
+
+Date: 2026-05-26
+
+Runtime:
+
+```text
+runtimes/comfyui-sec-v89
+ComfyUI flags: --highvram --use-sage-attention
+```
+
+Workflow:
+
+```text
+workflows/api/wan22_i2v_lightning_a14b_pressure_test.json
+```
+
+Settings:
+
+- WAN 2.2 I2V A14B high-noise FP8 + Lightning high LoRA.
+- WAN 2.2 I2V A14B low-noise FP8 + Lightning low LoRA.
+- UMT5 FP8 text encoder.
+- WAN 2.1 VAE.
+- 640x360, 17 frames, 16 fps.
+- 4 total sampler steps split across two phases.
+
+Result:
+
+- Prompt succeeded.
+- Output: `wan_ltx_tests/wan22_i2v_lightning_smoke_00001_.mp4`.
+- Output media: H.264 MP4, 640x360, 17 frames, 1.0625 seconds.
+- Total Comfy execution time: 00:10:10.
+- High-noise sampler: 2 steps in about 03:35.
+- Low-noise sampler: 2 steps in about 01:52.
+- Observed peak VRAM from `nvidia-smi`: about 32.0 GB used on a 32 GB RTX 5090.
+
+Conclusion:
+
+This validates the A14B high/low model and Lightning LoRA wiring, but the `--highvram` execution profile is too aggressive for a safe default. It keeps the card nearly full even for a tiny smoke run. The app should treat this as a pressure-test profile only.
+
+Immediate memory-management implication:
+
+- Do not default A14B to `--highvram`.
+- Prefer a safer default profile with Comfy's normal/offload memory management.
+- Use WAN 2.2 TI2V 5B as the first normal preset candidate.
+- Re-test A14B with GGUF and/or offload-managed FP8 before considering it for a "Performance" preset.
+
 ## Current Runtime Ranking
 
 1. `comfyui-sec-v89`: best optimized Comfy candidate because SageAttention/FlashAttention/xFormers/Triton import and Comfy starts with Sage Attention on RTX 5090.
@@ -225,7 +272,7 @@ Summary:
 
 ## Next Bake-Off Step
 
-Run a minimal real generation with the local WAN 2.2 TI2V 5B safetensors in:
+Run a minimal real generation with a safer memory profile, starting with local WAN 2.2 TI2V 5B safetensors in:
 
 1. `comfyui-sec-v89` with Sage Attention.
 2. `comfyui` clean runtime.
