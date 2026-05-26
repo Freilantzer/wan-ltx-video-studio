@@ -101,8 +101,14 @@ def build_render_job_plan(
     commands = tuple(_command_for_segment(profile, segment) for segment in video_plan.segments)
     stages = _build_stages(profile, resolved_components, selected_runtime_root, request)
 
-    execution_ready = False
-    blocked_reason = "Direct WAN GPU execution is not enabled yet; this endpoint builds the measured run shape only."
+    runtime_ready = (selected_runtime_root / "generate.py").is_file() and (selected_runtime_root / "wan").is_dir()
+    required_files_ready = all(component.exists for component in resolved_components if component.required)
+    execution_ready = profile.id == "wan22_ti2v_5b_fp16" and runtime_ready and required_files_ready
+    blocked_reason = (
+        ""
+        if execution_ready
+        else "GPU execution is currently wired only for the WAN 2.2 TI2V 5B fp16 smoke path."
+    )
 
     return RenderJobPlan(
         job_id=f"render-{uuid4().hex[:12]}",
@@ -156,7 +162,7 @@ def render_job_plan_to_payload(job: RenderJobPlan) -> dict:
         },
         "memoryStrategy": {
             "allocator": job.environment["PYTORCH_CUDA_ALLOC_CONF"],
-            "expertPlacement": "move only the active high/low WAN expert to CUDA",
+            "expertPlacement": _expert_placement(job.profile),
             "textEncoder": "encode, then offload before diffusion when offload is active",
             "vae": "decode after diffusion with DiT experts returned to CPU",
             "processPolicy": "one GPU render job at a time",
@@ -298,7 +304,15 @@ def _build_stages(
         ),
         RenderStage(
             name="gpu_execution",
-            status="pending",
-            detail="not wired yet; next slice connects the direct WAN runner behind this plan",
+            status="ready" if profile.id == "wan22_ti2v_5b_fp16" else "pending",
+            detail="single-segment TI2V 5B runner is wired; execution still requires explicit GPU approval"
+            if profile.id == "wan22_ti2v_5b_fp16"
+            else "A14B FP8 execution is pending custom FP8 linear support",
         ),
     )
+
+
+def _expert_placement(profile: RendererProfile) -> str:
+    if profile.id == "wan22_ti2v_5b_fp16":
+        return "single TI2V model moves to CUDA only during sampling when offload is active"
+    return "move only the active high/low WAN expert to CUDA"

@@ -14,12 +14,13 @@ The direct renderer must keep the high-noise and low-noise A14B experts mutually
 
 ## Current Backend Slice
 
-The first backend slice is deliberately GPU-safe. It resolves local model files, builds render-job commands, and exposes memory policy without loading models.
+The first backend slice resolves local model files, builds render-job commands, and exposes memory policy. GPU work remains opt-in: the segment runner refuses to execute unless `--allow-gpu` is present.
 
 Endpoints:
 
 - `GET /api/render/profiles`
 - `POST /api/render/plan`
+- `POST /api/render/segment-command`
 
 The render plan includes:
 
@@ -30,6 +31,16 @@ The render plan includes:
 - segment commands with frame count, prompt, seed, trim, sample steps, and offload flags
 - VRAM policy and allocator settings
 - execution stages, with GPU execution marked pending
+
+The first executable runner path is `wan22_ti2v_5b_fp16`. It is a smoke-test path for the direct render loop because its diffusion safetensors match the upstream WAN module keys directly. The A14B FP8 profiles stay planned-only until the backend has custom FP8 linear support for the scaled Comfy-style weights.
+
+The single-segment runner lives at:
+
+```text
+python -m wan_ltx_studio.rendering.single_segment_runner
+```
+
+Safe dry-runs use `--dry-run` and do not import Torch or create a CUDA context. Real GPU execution requires `--allow-gpu`.
 
 ## Implementation Notes
 
@@ -43,10 +54,11 @@ PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:256,expandable_segments:True
 
 ## Next Slice
 
-The next backend slice is the actual direct WAN runner:
+The next backend slice is the measured GPU smoke test:
 
-- add a process-level GPU job lock so only one render can load models at a time
-- load Comfy-style WAN safetensors into the upstream WAN module shape
+- run one short `wan22_ti2v_5b_fp16` segment through the direct runner
+- record peak allocated/reserved VRAM and output metadata
+- use that result to harden cancellation/progress before enabling longer jobs
+- then implement A14B FP8 linear support and high/low expert loading
 - apply profile LoRAs to the correct high/low expert only
-- run one segment at 720p with telemetry around peak allocated/reserved VRAM
-- compare output duration, frame count, and VRAM against the 25 GB reference before enabling multi-segment rendering
+- compare A14B 720p output duration, frame count, and VRAM against the 25 GB reference before enabling multi-segment rendering

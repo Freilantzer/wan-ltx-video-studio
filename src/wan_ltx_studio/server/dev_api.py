@@ -14,8 +14,10 @@ from wan_ltx_studio.planning import (
     plan_chunked_video,
 )
 from wan_ltx_studio.rendering import (
+    RenderExecutionError,
     RenderingError,
     build_render_job_plan,
+    build_single_segment_command,
     list_renderer_profiles,
     render_job_plan_to_payload,
 )
@@ -48,6 +50,9 @@ class StudioApiHandler(BaseHTTPRequestHandler):
         if self.path == "/api/render/plan":
             self._handle_render_plan()
             return
+        if self.path == "/api/render/segment-command":
+            self._handle_segment_command()
+            return
 
         self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
 
@@ -79,6 +84,43 @@ class StudioApiHandler(BaseHTTPRequestHandler):
             return
 
         self._send_json(render_job_plan_to_payload(job))
+
+    def _handle_segment_command(self) -> None:
+        try:
+            payload = self._read_json()
+            request = _request_from_payload(payload)
+            job = build_render_job_plan(
+                request,
+                model_root=_optional_str(payload, "modelRoot"),
+                runtime_root=_str(payload, "runtimeRoot", "runtimes/direct-wan/src/Wan2.2"),
+            )
+            command = build_single_segment_command(
+                job,
+                segment_index=_int(payload, "segmentIndex", 0),
+                output_path=_optional_str(payload, "outputPath"),
+                project_root=_str(payload, "projectRoot", "."),
+                dry_run=bool(payload.get("dryRun", True)),
+                allow_gpu=bool(payload.get("allowGpu", False)),
+            )
+        except (
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            PlanningError,
+            RenderingError,
+            RenderExecutionError,
+        ) as exc:
+            self._send_json({"error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+            return
+
+        self._send_json(
+            {
+                "dryRun": bool(payload.get("dryRun", True)),
+                "allowGpu": bool(payload.get("allowGpu", False)),
+                "command": command,
+                "note": "Do not run with allowGpu=true unless the GPU is free.",
+            }
+        )
 
     def _read_json(self) -> dict[str, Any]:
         content_length = int(self.headers.get("Content-Length", "0"))
@@ -204,6 +246,7 @@ def _profiles_to_payload() -> dict[str, Any]:
                     }
                     for component in profile.built_in_loras
                 ],
+                "executable": profile.id == "wan22_ti2v_5b_fp16",
             }
             for profile in list_renderer_profiles()
         ]

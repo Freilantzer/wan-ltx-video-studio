@@ -161,8 +161,8 @@ _PROFILES: dict[str, RendererProfile] = {
             ),
             ModelComponent(
                 role="text_encoder",
-                relative_path="text_encoders/umt5_xxl_fp8_e4m3fn_scaled.safetensors",
-                dtype="fp8_scaled",
+                relative_path="text_encoders/umt5_xxl_fp16.safetensors",
+                dtype="fp16",
                 format="safetensors",
             ),
             ModelComponent(
