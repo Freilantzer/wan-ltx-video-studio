@@ -154,6 +154,18 @@ Keep workflows in `workflows/` as versioned API-format JSON templates, plus a ty
 
 The app should never edit a raw workflow by brittle string replacement. It should parse JSON, patch known node IDs or semantic bindings from the manifest, validate, then submit.
 
+## Chunked WAN Strategy
+
+The first production path should model the user's proven long-video workflow as typed app concepts:
+
+- `SegmentPlan`: width, height, frame count, fps, seed, prompt, negative prompt, chunk index, and model phase settings.
+- `ContinuityPlan`: start image, previous segment frames, motion frame count, motion amplitude, duplicate-boundary trim policy.
+- `EnginePlan`: model files, text encoder, VAE, attention mode, LoRA stack, memory profile, and output format.
+
+The Comfy graph is an implementation detail. The app should generate segment plans from total duration and chunk duration, submit one segment at a time, feed the previous segment into the next segment, trim duplicate boundary frames, and concatenate the final result.
+
+The first Comfy implementation should use the native WAN/PainterLongVideo path from the reference workflow. `ComfyUI-WanVideoWrapper` remains a later alternate backend for advanced block swap, offload, cache, quantization, and control workflows.
+
 ## Memory Profiles
 
 ### Conservative

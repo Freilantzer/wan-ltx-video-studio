@@ -69,3 +69,26 @@ Do not pollute the global Python installs. Create isolated environments for:
 
 This matters because Windows, Blackwell, CUDA, PyTorch, Triton, xFormers, SageAttention, flash-attention alternatives, and custom nodes can have conflicting dependency requirements.
 
+## ADR-005: Build Long Video As A Segment Pipeline
+
+Status: accepted
+
+Long videos should be generated as chunked segment jobs, not as a single monolithic graph by default. The user's working WAN 2.2 workflow proves that 3 x 5 second chunks at 1280 x 720 can run on the target RTX 5090 while staying around the 25 GB VRAM range observed in Task Manager.
+
+The app should own:
+
+- segment planning from total duration, FPS, frame count, and pixel budget
+- previous-frame or previous-video continuity
+- duplicate boundary trimming
+- final concatenation
+- per-segment timing, seed, model, LoRA, and memory metadata
+
+ComfyUI nodes such as `PainterLongVideo`, `PathchSageAttentionKJ`, and `VHS_VideoCombine` can be used underneath an adapter, but the user should interact with shot settings and duration controls instead of a node graph.
+
+## ADR-006: Reference Comfy Install Is Read-Only Inspiration
+
+Status: accepted
+
+The existing install at `D:\IMAGE_GENERATORS\Comfy_UI_Furkan_V61\ComfyUI` is a reference environment only. It should not be modified by this project.
+
+The project may inspect it to understand node behavior, model placement, and proven workflow patterns. Runtime experiments, dependency installs, generated outputs, and managed app execution should happen inside `D:\VIDEO_GENS\wan-ltx-video-studio` or other explicitly created project directories.
