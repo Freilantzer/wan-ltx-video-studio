@@ -72,7 +72,7 @@ class RenderingBackendTests(unittest.TestCase):
             )
             payload = render_job_plan_to_payload(job)
 
-        self.assertFalse(payload["executionReady"])
+        self.assertTrue(payload["executionReady"])
         self.assertTrue(payload["requiredModelFilesReady"])
         self.assertEqual(payload["vramPolicy"]["targetGb"], 25.0)
         self.assertEqual(payload["memoryStrategy"]["expertPlacement"], "move only the active high/low WAN expert to CUDA")
@@ -84,7 +84,7 @@ class RenderingBackendTests(unittest.TestCase):
         self.assertEqual(payload["loras"]["requested"][0]["name"], "cinematic_motion")
         self.assertEqual(
             {stage["name"]: stage["status"] for stage in payload["stages"]}["gpu_execution"],
-            "pending",
+            "ready",
         )
 
     def test_ti2v_profile_builds_gpu_gated_runner_command(self):
@@ -369,13 +369,56 @@ class RenderingBackendTests(unittest.TestCase):
         self.assertEqual(detail["cropTop"], 8)
         self.assertEqual(detail["cropLeft"], 0)
 
-    def test_non_executable_profile_cannot_build_runner_command(self):
+    def test_a14b_profile_builds_gpu_gated_runner_command(self):
+        profile = get_renderer_profile("wan22_i2v_a14b_fp8_lightning_workflow")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            model_root = root / "models"
+            runtime_root = root / "runtime"
+            (runtime_root / "wan").mkdir(parents=True)
+            (runtime_root / "generate.py").write_text("# test runtime", encoding="utf-8")
+            for component in profile.all_components:
+                component_path = model_root / component.relative_path
+                component_path.parent.mkdir(parents=True, exist_ok=True)
+                component_path.write_bytes(b"x")
+
+            job = build_render_job_plan(
+                VideoRequest(
+                    width=1280,
+                    height=720,
+                    fps=16,
+                    total_seconds=5,
+                    chunk_seconds=5,
+                    start_image="inputs/start_frames_1280x720/woman_black_sand_beach.png",
+                    prompt="beach portrait",
+                    seed=17,
+                    base_model=profile.id,
+                ),
+                model_root=model_root,
+                runtime_root=runtime_root,
+            )
+            command = build_single_segment_command(
+                job,
+                project_root=root,
+                output_path=root / "renders" / "a14b.mp4",
+                dry_run=True,
+                allow_gpu=False,
+            )
+            payload = render_job_plan_to_payload(job)
+
+        self.assertTrue(payload["executionReady"])
+        self.assertIn("--sample-guide-scale", command)
+        self.assertIn("1,1", command)
+        self.assertIn("--dry-run", command)
+        self.assertNotIn("--allow-gpu", command)
+
+    def test_planned_only_profile_cannot_build_runner_command(self):
         job = build_render_job_plan(
             VideoRequest(
                 width=1280,
                 height=720,
                 total_seconds=5,
-                base_model="wan22_i2v_a14b_fp8_original",
+                base_model="wan22_i2v_a14b_q8_gguf",
             )
         )
 

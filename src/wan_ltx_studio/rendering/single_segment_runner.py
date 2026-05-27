@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict
 from pathlib import Path
@@ -73,14 +74,18 @@ def run_segment(config: SegmentRunnerConfig) -> dict[str, Any]:
     if warnings:
         payload["warnings"] = warnings
 
-    if profile.id != "wan22_ti2v_5b_fp16":
+    if profile.id not in {
+        "wan22_ti2v_5b_fp16",
+        "wan22_i2v_a14b_fp8_original",
+        "wan22_i2v_a14b_fp8_lightning_workflow",
+    }:
         raise SegmentRunnerError(
-            f"profile {profile.id} is not executable yet; first executable path is wan22_ti2v_5b_fp16"
+            f"profile {profile.id} is not executable yet"
         )
 
     model_root = Path(config.model_root).resolve()
     runtime_root = Path(config.runtime_root).resolve()
-    components = {component.role: model_root / component.relative_path for component in profile.components}
+    components = {component.role: model_root / component.relative_path for component in profile.all_components}
     missing = [str(path) for path in components.values() if not path.is_file()]
     if missing:
         raise SegmentRunnerError(f"missing required model files: {missing}")
@@ -98,7 +103,10 @@ def run_segment(config: SegmentRunnerConfig) -> dict[str, Any]:
 
     with _single_gpu_job_lock(Path(config.lock_path)):
         started = time.perf_counter()
-        telemetry = _run_ti2v_5b_segment(config, runtime_root, components)
+        if profile.id == "wan22_ti2v_5b_fp16":
+            telemetry = _run_ti2v_5b_segment(config, runtime_root, components)
+        else:
+            telemetry = _run_i2v_a14b_segment(config, runtime_root, components)
         payload["ok"] = True
         payload["elapsedSeconds"] = round(time.perf_counter() - started, 3)
         payload["telemetry"] = telemetry
@@ -148,6 +156,53 @@ def _run_ti2v_5b_segment(
             T5EncoderModel,
             Wan2_2_VAE,
             WanTI2V,
+            save_video,
+        )
+    finally:
+        windows_gpu_monitor.stop()
+
+
+def _run_i2v_a14b_segment(
+    config: SegmentRunnerConfig,
+    runtime_root: Path,
+    components: dict[str, Path],
+) -> dict[str, Any]:
+    sys.path.insert(0, str(runtime_root))
+
+    import torch
+    from PIL import Image
+    from easydict import EasyDict
+    from wan.configs import WAN_CONFIGS
+    from wan.image2video import WanI2V
+    from wan.modules.model import WanModel
+    from wan.modules.t5 import T5EncoderModel
+    from wan.modules.vae2_1 import Wan2_1_VAE
+    from wan.utils.utils import save_video
+
+    if not torch.cuda.is_available():
+        raise SegmentRunnerError("CUDA is not available")
+
+    output_path = Path(config.output_path).resolve()
+    telemetry_path = output_path.with_suffix(".telemetry.jsonl")
+    windows_gpu_memory_path = output_path.with_suffix(".windows-gpu-memory.jsonl")
+    windows_gpu_monitor = _WindowsGpuMemoryMonitor(windows_gpu_memory_path)
+
+    windows_gpu_monitor.start()
+    try:
+        return _run_i2v_a14b_segment_inner(
+            config,
+            components,
+            output_path,
+            telemetry_path,
+            windows_gpu_memory_path,
+            torch,
+            Image,
+            EasyDict,
+            WAN_CONFIGS,
+            WanModel,
+            T5EncoderModel,
+            Wan2_1_VAE,
+            WanI2V,
             save_video,
         )
     finally:
@@ -259,6 +314,159 @@ def _run_ti2v_5b_segment_inner(
     video, crop_detail = _crop_or_resize_video_to_request(video, config.height, config.width, torch)
     if crop_detail is not None:
         telemetry.mark("video_matched_requested_size", crop_detail, synchronize=True)
+    telemetry.mark("after_generate", synchronize=True)
+    _offload_vae_after_decode(pipeline.vae, telemetry, torch)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    telemetry.mark("before_save_video")
+    save_video(
+        tensor=video[None],
+        save_file=str(output_path),
+        fps=int(config.fps),
+        nrow=1,
+        normalize=True,
+        value_range=(-1, 1),
+    )
+    telemetry.mark("after_save_video", {"outputPath": str(output_path), "outputBytes": output_path.stat().st_size})
+
+    telemetry.mark("before_cleanup", synchronize=True)
+    del video, pipeline
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    telemetry.mark("after_cleanup", synchronize=True)
+
+    summary = telemetry.summary()
+    summary["outputBytes"] = output_path.stat().st_size if output_path.exists() else None
+    summary["telemetryPath"] = str(telemetry_path)
+    summary["windowsGpuMemoryPath"] = str(windows_gpu_memory_path)
+    return summary
+
+
+def _run_i2v_a14b_segment_inner(
+    config: SegmentRunnerConfig,
+    components: dict[str, Path],
+    output_path: Path,
+    telemetry_path: Path,
+    windows_gpu_memory_path: Path,
+    torch,
+    Image,
+    EasyDict,
+    WAN_CONFIGS,
+    WanModel,
+    T5EncoderModel,
+    Wan2_1_VAE,
+    WanI2V,
+    save_video,
+) -> dict[str, Any]:
+    _install_attention_fallback()
+    torch.cuda.reset_peak_memory_stats()
+    torch.cuda.empty_cache()
+    telemetry = _CudaMemoryTelemetry(torch, telemetry_path)
+    telemetry.mark(
+        "cuda_ready",
+        {
+            "profileId": config.profile_id,
+            "windowsGpuMemoryPath": str(windows_gpu_memory_path),
+        },
+    )
+
+    if not config.start_image:
+        raise SegmentRunnerError("WAN A14B I2V requires a start image")
+
+    cfg = EasyDict(WAN_CONFIGS["i2v-A14B"])
+    cfg.t5_checkpoint = str(components["text_encoder"])
+    cfg.vae_checkpoint = str(components["vae"])
+    cfg.t5_dtype = torch.bfloat16
+    cfg.param_dtype = torch.bfloat16
+    cfg.sample_steps = config.sample_steps
+    cfg.sample_shift = config.sample_shift
+    cfg.sample_guide_scale = config.sample_guide_scale
+    cfg.sample_fps = int(config.fps)
+
+    pipeline = WanI2V.__new__(WanI2V)
+    pipeline.device = torch.device("cuda:0")
+    pipeline.config = cfg
+    pipeline.rank = 0
+    pipeline.t5_cpu = config.t5_cpu
+    pipeline.init_on_cpu = True
+    pipeline.num_train_timesteps = cfg.num_train_timesteps
+    pipeline.boundary = cfg.boundary
+    pipeline.param_dtype = cfg.param_dtype
+    pipeline.vae_stride = cfg.vae_stride
+    pipeline.patch_size = cfg.patch_size
+    pipeline.sp_size = 1
+    pipeline.sample_neg_prompt = cfg.sample_neg_prompt
+    telemetry.mark(
+        "pipeline_shell_created",
+        {
+            "frameNum": config.frame_num,
+            "width": config.width,
+            "height": config.height,
+            "sampleSteps": config.sample_steps,
+        },
+    )
+
+    pipeline.text_encoder = _load_wan_t5_encoder(
+        T5EncoderModel,
+        cfg,
+        components["text_encoder"],
+        torch_module=torch,
+        fp8_scaled=True,
+    )
+    telemetry.mark("text_encoder_loaded_cpu")
+    pipeline.vae = _load_wan21_vae(Wan2_1_VAE, components["vae"], pipeline.device, torch)
+    telemetry.mark("vae_loaded_cuda")
+    _install_streaming_vae_decode(
+        pipeline.vae,
+        pipeline,
+        telemetry,
+        torch,
+        config,
+        unpatchify_fn=lambda decoded, patch_size: decoded,
+        spatial_upsample=8,
+        decoder_accepts_first_chunk=False,
+    )
+    telemetry.mark("vae_streaming_tiled_decode_installed")
+
+    pipeline.low_noise_model = _load_i2v_a14b_model(
+        WanModel,
+        cfg,
+        components["low_noise_dit"],
+        torch,
+        lora_path=components.get("low_noise_lora"),
+    )
+    telemetry.mark("low_noise_dit_loaded_cpu")
+    pipeline.high_noise_model = _load_i2v_a14b_model(
+        WanModel,
+        cfg,
+        components["high_noise_dit"],
+        torch,
+        lora_path=components.get("high_noise_lora"),
+    )
+    telemetry.mark("high_noise_dit_loaded_cpu")
+    _install_i2v_component_memory_hooks(pipeline, telemetry, expected_dit_forwards=config.sample_steps * 2)
+
+    img = Image.open(config.start_image).convert("RGB")
+    telemetry.mark("start_image_loaded_cpu", {"startImage": config.start_image})
+    telemetry.mark("before_generate", synchronize=True)
+    video = pipeline.generate(
+        config.prompt,
+        img=img,
+        max_area=config.width * config.height,
+        frame_num=config.frame_num,
+        shift=config.sample_shift,
+        sample_solver="unipc",
+        sampling_steps=config.sample_steps,
+        guide_scale=config.sample_guide_scale,
+        n_prompt=config.negative_prompt,
+        seed=-1 if config.seed is None else config.seed,
+        offload_model=config.offload_model,
+    )
+    if tuple(video.shape[-2:]) != (config.height, config.width):
+        raise SegmentRunnerError(
+            f"A14B output size {tuple(video.shape[-2:])} did not match requested {(config.height, config.width)}"
+        )
     telemetry.mark("after_generate", synchronize=True)
     _offload_vae_after_decode(pipeline.vae, telemetry, torch)
 
@@ -512,9 +720,16 @@ def _install_streaming_vae_decode(
     telemetry: _CudaMemoryTelemetry,
     torch_module,
     config: SegmentRunnerConfig,
+    *,
+    unpatchify_fn=None,
+    spatial_upsample: int = 16,
+    decoder_accepts_first_chunk: bool = True,
 ) -> None:
     import types
     import wan.modules.vae2_2 as vae2_2
+
+    if unpatchify_fn is None:
+        unpatchify_fn = vae2_2.unpatchify
 
     def streaming_decode(self, zs):
         if not isinstance(zs, list):
@@ -525,12 +740,14 @@ def _install_streaming_vae_decode(
                 _decode_wan22_vae_tiled_stream(
                     self,
                     latent,
-                    unpatchify_fn=vae2_2.unpatchify,
+                    unpatchify_fn=unpatchify_fn,
                     telemetry=telemetry,
                     torch_module=torch_module,
                     video_index=video_index,
                     tile_size=(config.vae_tile_height, config.vae_tile_width),
                     tile_stride=(config.vae_stride_height, config.vae_stride_width),
+                    spatial_upsample=spatial_upsample,
+                    decoder_accepts_first_chunk=decoder_accepts_first_chunk,
                 )
                 for video_index, latent in enumerate(zs)
             ]
@@ -542,6 +759,10 @@ def _offload_non_vae_components_before_decode(pipeline, telemetry: _CudaMemoryTe
     telemetry.mark("pre_vae_decode_offload_start")
     if getattr(pipeline, "model", None) is not None:
         pipeline.model.cpu()
+    for attr in ("low_noise_model", "high_noise_model"):
+        model = getattr(pipeline, attr, None)
+        if model is not None:
+            model.cpu()
     text_encoder = getattr(pipeline, "text_encoder", None)
     if text_encoder is not None and getattr(text_encoder, "model", None) is not None:
         text_encoder.model.cpu()
@@ -629,6 +850,7 @@ def _decode_wan22_vae_tiled_stream(
     tile_size: tuple[int, int] = (34, 34),
     tile_stride: tuple[int, int] = (18, 16),
     spatial_upsample: int = 16,
+    decoder_accepts_first_chunk: bool = True,
 ):
     latent_height = int(latent.shape[-2])
     latent_width = int(latent.shape[-1])
@@ -646,6 +868,7 @@ def _decode_wan22_vae_tiled_stream(
             telemetry=telemetry,
             torch_module=torch_module,
             video_index=video_index,
+            decoder_accepts_first_chunk=decoder_accepts_first_chunk,
         )
 
     latent_is_cuda = getattr(latent, "is_cuda", False)
@@ -694,6 +917,7 @@ def _decode_wan22_vae_tiled_stream(
             telemetry=None,
             torch_module=torch_module,
             video_index=video_index,
+            decoder_accepts_first_chunk=decoder_accepts_first_chunk,
         )
 
         if values is None:
@@ -837,6 +1061,7 @@ def _decode_wan22_vae_temporal_stream(
     telemetry: _CudaMemoryTelemetry | None,
     torch_module,
     video_index: int = 0,
+    decoder_accepts_first_chunk: bool = True,
 ):
     model = vae.model
     model.clear_cache()
@@ -866,7 +1091,7 @@ def _decode_wan22_vae_temporal_stream(
                 "feat_cache": model._feat_map,
                 "feat_idx": model._conv_idx,
             }
-            if chunk_index == 0:
+            if decoder_accepts_first_chunk and chunk_index == 0:
                 decoder_kwargs["first_chunk"] = True
 
             decoded_gpu = model.decoder(
@@ -943,6 +1168,28 @@ def _install_component_memory_hooks(pipeline, telemetry: _CudaMemoryTelemetry, e
         expected_calls=expected_dit_forwards,
         mark_every=10,
     )
+
+
+def _install_i2v_component_memory_hooks(pipeline, telemetry: _CudaMemoryTelemetry, expected_dit_forwards: int) -> None:
+    _wrap_method(pipeline.text_encoder.model, "to", telemetry, "text_encoder_to_device")
+    _wrap_method(pipeline.text_encoder.model, "cpu", telemetry, "text_encoder_to_cpu")
+    for attr, stage in (
+        ("low_noise_model", "low_noise_dit"),
+        ("high_noise_model", "high_noise_dit"),
+    ):
+        model = getattr(pipeline, attr)
+        _wrap_method(model, "to", telemetry, f"{stage}_to_device")
+        _wrap_method(model, "cpu", telemetry, f"{stage}_to_cpu")
+        _wrap_counted_method(
+            model,
+            "forward",
+            telemetry,
+            f"{stage}_forward",
+            expected_calls=expected_dit_forwards,
+            mark_every=10,
+        )
+    _wrap_method(pipeline.vae, "encode", telemetry, "vae_encode")
+    _wrap_method(pipeline.vae, "decode", telemetry, "vae_decode")
 
 
 def _wrap_method(target, method_name: str, telemetry: _CudaMemoryTelemetry, stage: str) -> None:
@@ -1158,11 +1405,209 @@ def _load_wan22_vae(vae_cls, path: Path, device):
     return vae
 
 
-def _load_wan_t5_encoder(t5_cls, cfg, path: Path):
+def _load_wan21_vae(vae_cls, path: Path, device, torch_module):
+    from safetensors.torch import load_file
+
+    import wan.modules.vae2_1 as vae2_1
+
+    original_video_vae = vae2_1._video_vae
+    try:
+        vae2_1._video_vae = lambda *args, **kwargs: torch_module.nn.Identity()
+        vae = vae_cls(vae_pth=None, dtype=torch_module.bfloat16, device=device)
+    finally:
+        vae2_1._video_vae = original_video_vae
+
+    with torch_module.device("meta"):
+        model = vae2_1.WanVAE_(
+            dim=96,
+            z_dim=16,
+            dim_mult=[1, 2, 4, 4],
+            num_res_blocks=2,
+            attn_scales=[],
+            temperal_downsample=[False, True, True],
+            dropout=0.0,
+        )
+    state_dict = load_file(str(path), device="cpu")
+    missing, unexpected = model.load_state_dict(state_dict, assign=True, strict=False)
+    if missing or unexpected:
+        raise SegmentRunnerError(f"WAN 2.1 VAE load mismatch: missing={missing}, unexpected={unexpected}")
+    vae.model = model.eval().requires_grad_(False).to(device)
+    return vae
+
+
+def _load_i2v_a14b_model(model_cls, cfg, path: Path, torch_module, *, lora_path: Path | None = None):
+    from safetensors.torch import load_file
+
+    with torch_module.device("meta"):
+        model = model_cls(
+            model_type="i2v",
+            patch_size=cfg.patch_size,
+            text_len=cfg.text_len,
+            in_dim=36,
+            dim=cfg.dim,
+            ffn_dim=cfg.ffn_dim,
+            freq_dim=cfg.freq_dim,
+            text_dim=4096,
+            out_dim=16,
+            num_heads=cfg.num_heads,
+            num_layers=cfg.num_layers,
+            window_size=cfg.window_size,
+            qk_norm=cfg.qk_norm,
+            cross_attn_norm=cfg.cross_attn_norm,
+            eps=cfg.eps,
+        )
+    raw_state_dict = load_file(str(path), device="cpu")
+    state_dict, scale_weights = _split_fp8_scaled_state_dict(raw_state_dict)
+    missing, unexpected = model.load_state_dict(state_dict, assign=True, strict=False)
+    if missing or unexpected:
+        raise SegmentRunnerError(f"A14B I2V model load mismatch: missing={missing}, unexpected={unexpected}")
+    loras = _load_wan_lora_adapters(lora_path, torch_module) if lora_path is not None else {}
+    _patch_fp8_scaled_linears(model, torch_module, cfg.param_dtype, scale_weights, loras=loras)
+    _reset_wan_rope_freqs(model, cfg)
+    return model.eval().requires_grad_(False)
+
+
+def _split_fp8_scaled_state_dict(state_dict: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    weights = {}
+    scale_weights = {}
+    for key, value in state_dict.items():
+        if key.endswith(".scale_weight"):
+            scale_weights[key.removesuffix(".scale_weight")] = value
+            continue
+        if key.endswith(".scale_input") or key == "scaled_fp8":
+            continue
+        weights[key] = value
+    return weights, scale_weights
+
+
+def _load_wan_lora_adapters(path: Path, torch_module) -> dict[str, dict[str, Any]]:
+    from safetensors.torch import load_file
+
+    state_dict = load_file(str(path), device="cpu")
+    adapters: dict[str, dict[str, Any]] = {}
+    prefix = "diffusion_model."
+    for key, value in state_dict.items():
+        if not key.startswith(prefix):
+            continue
+        key = key[len(prefix) :]
+        for suffix, field in (
+            (".lora_down.weight", "down"),
+            (".lora_up.weight", "up"),
+            (".alpha", "alpha"),
+        ):
+            if key.endswith(suffix):
+                module_name = key.removesuffix(suffix)
+                adapters.setdefault(module_name, {})[field] = value
+                break
+    return {
+        name: adapter
+        for name, adapter in adapters.items()
+        if {"down", "up", "alpha"}.issubset(adapter)
+    }
+
+
+def _patch_fp8_scaled_linears(
+    module,
+    torch_module,
+    base_dtype,
+    scale_weights: dict[str, Any],
+    *,
+    loras: dict[str, dict[str, Any]] | None = None,
+) -> int:
+    patched = 0
+    fp8_dtypes = tuple(
+        dtype
+        for dtype in (
+            getattr(torch_module, "float8_e4m3fn", None),
+            getattr(torch_module, "float8_e5m2", None),
+        )
+        if dtype is not None
+    )
+    for name, submodule in module.named_modules():
+        if not isinstance(submodule, torch_module.nn.Linear):
+            continue
+        scale_weight = scale_weights.get(name)
+        lora = (loras or {}).get(name)
+        if scale_weight is not None:
+            submodule.register_buffer("_wan_ltx_scale_weight", scale_weight.float(), persistent=False)
+        if lora is not None:
+            submodule.register_buffer("_wan_ltx_lora_down", lora["down"], persistent=False)
+            submodule.register_buffer("_wan_ltx_lora_up", lora["up"], persistent=False)
+            submodule.register_buffer("_wan_ltx_lora_alpha", lora["alpha"].float().reshape(()), persistent=False)
+            submodule._wan_ltx_lora_strength = 1.0
+        if submodule.weight.dtype in fp8_dtypes or lora is not None:
+            submodule._wan_ltx_base_dtype = torch_module.float32 if name.startswith("time_") else base_dtype
+            submodule.forward = types.MethodType(_fp8_scaled_linear_forward, submodule)
+            patched += 1
+    return patched
+
+
+def _fp8_scaled_linear_forward(self, input):
+    import torch
+
+    weight = self.weight
+    bias = self.bias
+    fp8_dtypes = tuple(
+        dtype
+        for dtype in (
+            getattr(torch, "float8_e4m3fn", None),
+            getattr(torch, "float8_e5m2", None),
+        )
+        if dtype is not None
+    )
+    base_dtype = getattr(self, "_wan_ltx_base_dtype", input.dtype)
+    if weight.dtype in fp8_dtypes:
+        out = _fp8_scaled_linear(input, weight, bias, getattr(self, "_wan_ltx_scale_weight", None), base_dtype, torch)
+    else:
+        out = torch.nn.functional.linear(input, weight, bias)
+
+    if hasattr(self, "_wan_ltx_lora_down"):
+        lora_input = input.to(base_dtype)
+        down = self._wan_ltx_lora_down.to(device=input.device, dtype=base_dtype)
+        up = self._wan_ltx_lora_up.to(device=input.device, dtype=base_dtype)
+        alpha = self._wan_ltx_lora_alpha.to(device=input.device, dtype=base_dtype)
+        rank = max(1, int(down.shape[0]))
+        strength = getattr(self, "_wan_ltx_lora_strength", 1.0)
+        lora_out = torch.nn.functional.linear(torch.nn.functional.linear(lora_input, down), up)
+        out = out + lora_out * (alpha / rank) * strength
+    return out
+
+
+def _fp8_scaled_linear(input, weight, bias, scale_weight, out_dtype, torch_module):
+    if input.device.type == "cuda" and hasattr(torch_module, "_scaled_mm"):
+        input_shape = input.shape
+        scale_input = torch_module.ones((), device=input.device, dtype=torch_module.float32)
+        scale_b = (
+            scale_weight.to(device=input.device, dtype=torch_module.float32).squeeze()
+            if scale_weight is not None
+            else torch_module.ones((), device=input.device, dtype=torch_module.float32)
+        )
+        flat = input.clamp(min=-448, max=448).reshape(-1, input_shape[-1]).to(torch_module.float8_e4m3fn).contiguous()
+        linear_bias = bias.to(out_dtype) if bias is not None else None
+        out = torch_module._scaled_mm(
+            flat,
+            weight.t(),
+            out_dtype=out_dtype,
+            bias=linear_bias,
+            scale_a=scale_input,
+            scale_b=scale_b,
+        )
+        return out.reshape(*input_shape[:-1], weight.shape[0])
+
+    work_weight = weight.to(out_dtype)
+    if scale_weight is not None:
+        work_weight = work_weight * scale_weight.to(device=work_weight.device, dtype=out_dtype)
+    linear_bias = bias.to(out_dtype) if bias is not None else None
+    return torch_module.nn.functional.linear(input.to(out_dtype), work_weight, linear_bias)
+
+
+def _load_wan_t5_encoder(t5_cls, cfg, path: Path, *, torch_module=None, fp8_scaled: bool = False):
     import torch
     from safetensors.torch import load_file
     from wan.modules.t5 import umt5_xxl
     from wan.modules.tokenizers import HuggingfaceTokenizer
+
+    torch_module = torch_module or torch
 
     encoder = t5_cls.__new__(t5_cls)
     encoder.text_len = cfg.text_len
@@ -1178,10 +1623,13 @@ def _load_wan_t5_encoder(t5_cls, cfg, path: Path):
             dtype=cfg.t5_dtype,
             device="meta",
         ).eval().requires_grad_(False)
-    state_dict = _convert_comfy_umt5_state_dict(load_file(str(path), device="cpu"))
+    raw_state_dict = load_file(str(path), device="cpu")
+    state_dict, scale_weights = _convert_comfy_umt5_state_dict_with_scales(raw_state_dict)
     missing, unexpected = model.load_state_dict(state_dict, assign=True, strict=False)
     if missing or unexpected:
         raise SegmentRunnerError(f"UMT5 load mismatch: missing={missing}, unexpected={unexpected}")
+    if fp8_scaled or scale_weights:
+        _patch_fp8_scaled_linears(model, torch_module, cfg.t5_dtype, scale_weights)
     encoder.model = model.to(encoder.device)
     encoder.tokenizer = HuggingfaceTokenizer(
         name=cfg.t5_tokenizer,
@@ -1192,38 +1640,51 @@ def _load_wan_t5_encoder(t5_cls, cfg, path: Path):
 
 
 def _convert_comfy_umt5_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
+    converted, _ = _convert_comfy_umt5_state_dict_with_scales(state_dict)
+    return converted
+
+
+def _convert_comfy_umt5_state_dict_with_scales(state_dict: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     converted = {}
+    scale_weights = {}
     for key, value in state_dict.items():
         if key == "spiece_model":
             continue
-        if key == "shared.weight":
-            converted["token_embedding.weight"] = value
+        if key.endswith(".scale_weight"):
+            converted_key = _convert_comfy_umt5_weight_key(key.removesuffix(".scale_weight") + ".weight")
+            scale_weights[converted_key.removesuffix(".weight")] = value
             continue
-        if key == "encoder.final_layer_norm.weight":
-            converted["norm.weight"] = value
+        if key.endswith(".scale_input") or key == "scaled_fp8":
             continue
-        if key.startswith("encoder.block."):
-            parts = key.split(".")
-            block = parts[2]
-            suffix = ".".join(parts[3:])
-            prefix = f"blocks.{block}"
-            replacements = {
-                "layer.0.layer_norm.weight": f"{prefix}.norm1.weight",
-                "layer.0.SelfAttention.q.weight": f"{prefix}.attn.q.weight",
-                "layer.0.SelfAttention.k.weight": f"{prefix}.attn.k.weight",
-                "layer.0.SelfAttention.v.weight": f"{prefix}.attn.v.weight",
-                "layer.0.SelfAttention.o.weight": f"{prefix}.attn.o.weight",
-                "layer.0.SelfAttention.relative_attention_bias.weight": f"{prefix}.pos_embedding.embedding.weight",
-                "layer.1.layer_norm.weight": f"{prefix}.norm2.weight",
-                "layer.1.DenseReluDense.wi_0.weight": f"{prefix}.ffn.gate.0.weight",
-                "layer.1.DenseReluDense.wi_1.weight": f"{prefix}.ffn.fc1.weight",
-                "layer.1.DenseReluDense.wo.weight": f"{prefix}.ffn.fc2.weight",
-            }
-            if suffix in replacements:
-                converted[replacements[suffix]] = value
-                continue
-        raise SegmentRunnerError(f"unsupported UMT5 key: {key}")
-    return converted
+        converted[_convert_comfy_umt5_weight_key(key)] = value
+    return converted, scale_weights
+
+
+def _convert_comfy_umt5_weight_key(key: str) -> str:
+    if key == "shared.weight":
+        return "token_embedding.weight"
+    if key == "encoder.final_layer_norm.weight":
+        return "norm.weight"
+    if key.startswith("encoder.block."):
+        parts = key.split(".")
+        block = parts[2]
+        suffix = ".".join(parts[3:])
+        prefix = f"blocks.{block}"
+        replacements = {
+            "layer.0.layer_norm.weight": f"{prefix}.norm1.weight",
+            "layer.0.SelfAttention.q.weight": f"{prefix}.attn.q.weight",
+            "layer.0.SelfAttention.k.weight": f"{prefix}.attn.k.weight",
+            "layer.0.SelfAttention.v.weight": f"{prefix}.attn.v.weight",
+            "layer.0.SelfAttention.o.weight": f"{prefix}.attn.o.weight",
+            "layer.0.SelfAttention.relative_attention_bias.weight": f"{prefix}.pos_embedding.embedding.weight",
+            "layer.1.layer_norm.weight": f"{prefix}.norm2.weight",
+            "layer.1.DenseReluDense.wi_0.weight": f"{prefix}.ffn.gate.0.weight",
+            "layer.1.DenseReluDense.wi_1.weight": f"{prefix}.ffn.fc1.weight",
+            "layer.1.DenseReluDense.wo.weight": f"{prefix}.ffn.fc2.weight",
+        }
+        if suffix in replacements:
+            return replacements[suffix]
+    raise SegmentRunnerError(f"unsupported UMT5 key: {key}")
 
 
 def _normalize_wan22_vae_state_dict(state_dict: dict[str, Any]) -> dict[str, Any]:
@@ -1266,7 +1727,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--runtime-root", default="runtimes/direct-wan/src/Wan2.2")
     parser.add_argument("--sample-steps", type=int, required=True)
     parser.add_argument("--sample-shift", type=float, required=True)
-    parser.add_argument("--sample-guide-scale", type=float, required=True)
+    parser.add_argument("--sample-guide-scale", type=_parse_sample_guide_scale, required=True)
     parser.add_argument("--offload-model", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--t5-cpu", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--dry-run", action="store_true")
@@ -1277,6 +1738,16 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--vae-stride-height", type=int, default=18)
     parser.add_argument("--vae-stride-width", type=int, default=16)
     return parser.parse_args()
+
+
+def _parse_sample_guide_scale(value: str) -> float | tuple[float, float]:
+    cleaned = value.strip().strip("()[]")
+    if "," not in cleaned:
+        return float(cleaned)
+    parts = [part.strip() for part in cleaned.split(",") if part.strip()]
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("--sample-guide-scale expects one float or two comma-separated floats")
+    return float(parts[0]), float(parts[1])
 
 
 if __name__ == "__main__":

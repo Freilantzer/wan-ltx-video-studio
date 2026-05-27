@@ -32,7 +32,14 @@ The render plan includes:
 - VRAM policy and allocator settings
 - execution stages, with GPU execution marked pending
 
-The first executable runner path is `wan22_ti2v_5b_fp16`. It is a smoke-test path for the direct render loop because its diffusion safetensors match the upstream WAN module keys directly. The A14B FP8 profiles stay planned-only until the backend has custom FP8 linear support for the scaled Comfy-style weights.
+The first executable runner path was `wan22_ti2v_5b_fp16`. It is a smoke-test path for the direct render loop because its diffusion safetensors match the upstream WAN module keys directly.
+
+The A14B FP8 I2V path is now wired for the local scaled safetensors:
+
+- `wan22_i2v_a14b_fp8_original`
+- `wan22_i2v_a14b_fp8_lightning_workflow`
+
+The runner loads the high-noise and low-noise experts as separate CPU-resident modules, patches FP8 scaled `Linear` layers with their `scale_weight` tensors, preserves WAN's timestep-based high/low expert switching, attaches phase-specific Lightning LoRAs when the Lightning profile is selected, and uses the WAN 2.1 VAE. The first GPU render is still pending; current validation is CPU-only model compatibility plus CLI dry-run.
 
 The single-segment runner lives at:
 
@@ -131,7 +138,17 @@ A second exact-size 720p/81 start-frame run used `inputs/start_frames_1280x720/w
 - peak Windows shared GPU memory: `0.154` GB
 - VAE decode began and ended around `3.527` GB driver-used VRAM
 
-WAN I2V snaps 1280x720 to its internal spatial grid. The runner now generates at `1280x736`, resizes the start image to that grid, then center-crops the decoded result back to the requested `1280x720` before saving. This avoids the upstream floor-to-704 behavior while keeping the saved video at the requested size.
+WAN TI2V 5B snaps 1280x720 to its internal spatial grid. The 5B runner currently generates at `1280x736`, resizes the start image to that grid, then center-crops the decoded result back to the requested `1280x720` before saving. This avoids the upstream floor-to-704 behavior while keeping the saved video at the requested size. The A14B I2V path uses WAN's native 720p grid for a 1280x720 start image and raises an error if the result does not match the requested size.
+
+## A14B CPU Compatibility
+
+The A14B Lightning path has passed a CPU-only load check against the local model files:
+
+- FP8 UMT5 text encoder loads and patches scaled linears.
+- WAN 2.1 VAE safetensors load into the upstream VAE class shape.
+- Low-noise A14B expert loads with `406` FP8 parameters and `400` Lightning LoRA modules attached.
+- High-noise A14B expert loads with `406` FP8 parameters and `400` Lightning LoRA modules attached.
+- CLI dry-run resolves all A14B Lightning components without creating a CUDA context.
 
 ## Comfy Memory Findings
 
@@ -164,8 +181,7 @@ The next backend slice is to harden the render path before enabling longer jobs:
 - stream progress and cancellation state into the local API
 - surface render lock state in the UI
 - surface staged VRAM telemetry in the UI/API render details
+- run the first A14B Lightning GPU smoke and compare dedicated/shared VRAM against the 25 GB target
 - tune tiled VAE presets for quality, speed, and A14B profiles
 - install or build a proper compiled attention kernel for the production runtime
-- then implement A14B FP8 linear support and high/low expert loading
-- apply profile LoRAs to the correct high/low expert only
 - compare A14B 720p output duration, frame count, and VRAM against the 25 GB reference before enabling multi-segment rendering

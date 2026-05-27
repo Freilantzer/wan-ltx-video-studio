@@ -27,6 +27,7 @@ Current working pieces:
 - Model/profile metadata for WAN 2.2 and future LTX providers.
 - Local model-library mapping with large model files ignored by git.
 - Direct WAN 2.2 5B runner for smoke tests and calibration.
+- Direct WAN 2.2 A14B I2V runner path wired for FP8 scaled high/low experts and Lightning LoRAs.
 - GPU opt-in guard for render execution.
 - Staged CUDA memory telemetry written into render results.
 - Windows dedicated/shared GPU memory sidecar telemetry via `typeperf`.
@@ -34,7 +35,9 @@ Current working pieces:
 
 ## Current Renderer
 
-The first executable backend path is `wan22_ti2v_5b_fp16`. It proves the app-owned renderer can load local WAN model files, encode prompts/start frames, run sampling, decode VAE output, and save MP4s directly.
+The first executable backend path was `wan22_ti2v_5b_fp16`. It proves the app-owned renderer can load local WAN model files, encode prompts/start frames, run sampling, decode VAE output, and save MP4s directly.
+
+The next path is now wired for `wan22_i2v_a14b_fp8_lightning_workflow`. It loads the local A14B FP8 scaled high/low experts, attaches the phase-specific Lightning LoRAs, uses the WAN 2.1 VAE, and keeps the upstream high/low expert switching behavior. CPU-only compatibility checks pass; the first GPU smoke is pending.
 
 Completed calibration work:
 
@@ -45,6 +48,7 @@ Completed calibration work:
 - Temporal VAE streaming was implemented and measured.
 - Spatial tiled WAN VAE decode with overlap blending and CPU accumulation was implemented.
 - Two 81-frame 1280x720 I2V calibration renders now complete with exact 1280x720 saved frames.
+- A14B FP8 scaled weight loading and phase-specific Lightning LoRA attachment now pass CPU-only compatibility checks.
 
 Latest 720p finding:
 
@@ -70,9 +74,8 @@ The main items still ahead:
 
 - API progress stream and cancellation state.
 - Render details in the UI, including telemetry and output metadata.
-- A14B FP8 scaled weight support.
-- High/low expert loading with only the active expert on CUDA.
-- Lightning/Turbo LoRA routing for the correct expert.
+- First A14B GPU smoke render and VRAM measurement.
+- Tune tiled VAE presets for A14B speed and memory.
 - User-facing model and LoRA selectors wired to the render plan.
 - LTX provider implementation.
 - Packaged local desktop experience.

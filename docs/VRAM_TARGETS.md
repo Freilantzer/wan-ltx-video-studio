@@ -78,3 +78,16 @@ The first exact-size 720p/81 direct renders now complete on the app-owned 5B pat
 - VAE path: pre-decode DiT/text-encoder offload, spatial tiled decode, temporal streaming per tile, overlap blending, CPU accumulation.
 
 This validates the first memory-management shape for the standalone renderer. The next VRAM acceptance check is the same behavior on the A14B high/low expert path.
+
+## A14B Readiness
+
+Date: 2026-05-27
+
+The A14B FP8 Lightning profile is now wired for direct execution, but not yet GPU-measured:
+
+- High/low FP8 scaled experts load against the upstream WAN I2V module shape.
+- Phase-specific Lightning LoRAs attach to the matching high/low expert.
+- FP8 UMT5 and WAN 2.1 VAE load without state-dict mismatches.
+- The runner preserves WAN's active-expert offload behavior.
+
+The next acceptance run should be a single 81-frame `1280 x 720`, 16 fps, 4-step Lightning I2V segment. Success criteria are exact output shape, no Windows shared GPU memory spill, and peak dedicated VRAM near the known 25 GB reference.

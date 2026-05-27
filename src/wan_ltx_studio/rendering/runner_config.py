@@ -20,7 +20,7 @@ class SegmentRunnerConfig:
     runtime_root: str
     sample_steps: int
     sample_shift: float
-    sample_guide_scale: float
+    sample_guide_scale: float | tuple[float, float]
     offload_model: bool = True
     t5_cpu: bool = False
     dry_run: bool = False

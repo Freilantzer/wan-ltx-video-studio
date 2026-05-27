@@ -78,6 +78,13 @@ class RenderJobPlan:
 
 DEFAULT_ALLOCATOR_CONFIG = "max_split_size_mb:256,expandable_segments:True"
 DEFAULT_RUNTIME_ROOT = Path("runtimes/direct-wan/src/Wan2.2")
+EXECUTABLE_PROFILE_IDS = frozenset(
+    {
+        "wan22_ti2v_5b_fp16",
+        "wan22_i2v_a14b_fp8_original",
+        "wan22_i2v_a14b_fp8_lightning_workflow",
+    }
+)
 
 
 def build_render_job_plan(
@@ -103,11 +110,12 @@ def build_render_job_plan(
 
     runtime_ready = (selected_runtime_root / "generate.py").is_file() and (selected_runtime_root / "wan").is_dir()
     required_files_ready = all(component.exists for component in resolved_components if component.required)
-    execution_ready = profile.id == "wan22_ti2v_5b_fp16" and runtime_ready and required_files_ready
+    executable_profile = profile.id in EXECUTABLE_PROFILE_IDS
+    execution_ready = executable_profile and runtime_ready and required_files_ready
     blocked_reason = (
         ""
         if execution_ready
-        else "GPU execution is currently wired only for the WAN 2.2 TI2V 5B fp16 smoke path."
+        else _blocked_reason(profile, executable_profile, runtime_ready, required_files_ready)
     )
 
     return RenderJobPlan(
@@ -304,10 +312,12 @@ def _build_stages(
         ),
         RenderStage(
             name="gpu_execution",
-            status="ready" if profile.id == "wan22_ti2v_5b_fp16" else "pending",
+            status="ready" if profile.id in EXECUTABLE_PROFILE_IDS else "pending",
             detail="single-segment TI2V 5B runner is wired; execution still requires explicit GPU approval"
             if profile.id == "wan22_ti2v_5b_fp16"
-            else "A14B FP8 execution is pending custom FP8 linear support",
+            else "A14B FP8 runner is wired behind explicit GPU approval"
+            if profile.id in EXECUTABLE_PROFILE_IDS
+            else "direct execution support is pending for this profile",
         ),
     )
 
@@ -316,3 +326,18 @@ def _expert_placement(profile: RendererProfile) -> str:
     if profile.id == "wan22_ti2v_5b_fp16":
         return "single TI2V model moves to CUDA only during sampling when offload is active"
     return "move only the active high/low WAN expert to CUDA"
+
+
+def _blocked_reason(
+    profile: RendererProfile,
+    executable_profile: bool,
+    runtime_ready: bool,
+    required_files_ready: bool,
+) -> str:
+    if not executable_profile:
+        return f"GPU execution is not wired for profile {profile.id} yet."
+    if not runtime_ready:
+        return "Direct WAN runtime is missing."
+    if not required_files_ready:
+        return "Required model files are missing."
+    return "Render job is not execution-ready."

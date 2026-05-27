@@ -19,9 +19,9 @@ def build_single_segment_command(
     dry_run: bool = True,
     allow_gpu: bool = False,
 ) -> list[str]:
-    if job.profile.id != "wan22_ti2v_5b_fp16":
+    if not job.execution_ready:
         raise RenderExecutionError(
-            f"profile {job.profile.id} is not executable yet; first executable path is wan22_ti2v_5b_fp16"
+            job.blocked_reason or f"profile {job.profile.id} is not executable yet"
         )
     if segment_index < 0 or segment_index >= len(job.commands):
         raise RenderExecutionError(f"segment index out of range: {segment_index}")
@@ -60,7 +60,7 @@ def build_single_segment_command(
         "--sample-shift",
         str(command.sample_shift),
         "--sample-guide-scale",
-        str(command.sample_guide_scale),
+        _format_sample_guide_scale(command.sample_guide_scale),
         "--lock-path",
         str(root / "renders" / ".render.lock"),
     ]
@@ -79,3 +79,9 @@ def build_single_segment_command(
     if allow_gpu:
         args.append("--allow-gpu")
     return args
+
+
+def _format_sample_guide_scale(value: tuple[float, float] | float) -> str:
+    if isinstance(value, tuple):
+        return ",".join(f"{item:g}" for item in value)
+    return f"{value:g}"
