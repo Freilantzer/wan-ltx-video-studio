@@ -26,6 +26,10 @@ class SegmentRunnerConfig:
     dry_run: bool = False
     allow_gpu: bool = False
     lock_path: str = "renders/.render.lock"
+    vae_tile_height: int = 34
+    vae_tile_width: int = 34
+    vae_stride_height: int = 18
+    vae_stride_width: int = 16
 
 
 def default_runtime_python(project_root: Path) -> Path:

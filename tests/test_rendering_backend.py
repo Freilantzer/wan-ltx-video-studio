@@ -13,7 +13,10 @@ from wan_ltx_studio.rendering import (
 )
 from wan_ltx_studio.rendering.single_segment_runner import (
     _CudaMemoryTelemetry,
+    _crop_or_resize_video_to_request,
+    _ceil_to_multiple,
     _convert_comfy_umt5_state_dict,
+    _decode_wan22_vae_tiled_stream,
     _decode_wan22_vae_temporal_stream,
     _install_attention_fallback,
     _normalize_wan22_vae_state_dict,
@@ -292,6 +295,79 @@ class RenderingBackendTests(unittest.TestCase):
         self.assertEqual(fake_vae.model.decoder_calls, [True, False, False])
         self.assertEqual([stage for stage, _, _ in telemetry.stages][0], "vae_temporal_decode_conv2_end")
         self.assertEqual([stage for stage, _, _ in telemetry.stages][-1], "vae_temporal_decode_chunk_cpu")
+
+    def test_tiled_wan_vae_decode_accumulates_spatial_tiles_on_cpu(self):
+        import torch
+
+        class FakeModel:
+            z_dim = 1
+
+            def __init__(self):
+                self.clear_count = 0
+                self.decoder_calls = 0
+                self._feat_map = [None]
+                self._conv_idx = [0]
+
+            def clear_cache(self):
+                self.clear_count += 1
+                self._feat_map = [None]
+                self._conv_idx = [0]
+
+            def conv2(self, z):
+                return z
+
+            def decoder(self, x, feat_cache, feat_idx, first_chunk=False):
+                self.decoder_calls += 1
+                return x
+
+        class FakeVae:
+            def __init__(self):
+                self.model = FakeModel()
+                self.scale = [0.0, 1.0]
+
+        class FakeTelemetry:
+            def __init__(self):
+                self.stages = []
+
+            def mark(self, stage, detail=None, synchronize=False):
+                self.stages.append((stage, detail, synchronize))
+
+        latent = torch.linspace(-0.7, 0.7, 8, dtype=torch.float32).reshape(1, 2, 2, 2)
+        telemetry = FakeTelemetry()
+        fake_vae = FakeVae()
+
+        decoded = _decode_wan22_vae_tiled_stream(
+            fake_vae,
+            latent,
+            unpatchify_fn=lambda tensor, patch_size: tensor,
+            telemetry=telemetry,
+            torch_module=torch,
+            tile_size=(2, 1),
+            tile_stride=(1, 1),
+            spatial_upsample=1,
+        )
+
+        self.assertEqual(tuple(decoded.shape), (1, 2, 2, 2))
+        self.assertFalse(decoded.is_cuda)
+        self.assertTrue(torch.allclose(decoded, latent))
+        self.assertGreater(fake_vae.model.decoder_calls, 2)
+        self.assertEqual([stage for stage, _, _ in telemetry.stages][0], "vae_tiled_decode_start")
+        self.assertEqual([stage for stage, _, _ in telemetry.stages][-1], "vae_tiled_decode_end")
+
+    def test_runner_ceil_multiple_supports_wan_generation_grid(self):
+        self.assertEqual(_ceil_to_multiple(720, 32), 736)
+        self.assertEqual(_ceil_to_multiple(1280, 32), 1280)
+
+    def test_video_center_crop_matches_requested_size(self):
+        import torch
+
+        video = torch.zeros((3, 81, 736, 1280), dtype=torch.float32)
+        cropped, detail = _crop_or_resize_video_to_request(video, 720, 1280, torch)
+
+        self.assertEqual(tuple(cropped.shape), (3, 81, 720, 1280))
+        self.assertEqual(detail["mode"], "center_crop")
+        self.assertEqual(detail["cropTop"], 8)
+        self.assertEqual(detail["cropLeft"], 0)
 
     def test_non_executable_profile_cannot_build_runner_command(self):
         job = build_render_job_plan(

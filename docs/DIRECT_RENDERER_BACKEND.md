@@ -107,6 +107,32 @@ The first standalone mitigation is a streaming temporal VAE decode path for WAN 
 
 Follow-up 81-frame 1280x720 test result: pre-VAE cleanup worked, dropping driver-used VRAM to about `3.5` GB before decode. Temporal streaming still failed at 720p because the VAE decoder's per-spatial-chunk activation cost crossed dedicated VRAM and spilled into shared GPU memory. The run reached about `31.1` GB dedicated plus `9.75` GB shared before it was stopped. Conclusion: temporal streaming is useful but insufficient; 720p/81 needs spatial tiled VAE decode or a Comfy-equivalent tiled VAE fallback.
 
+The current runner adds that spatial tiled VAE path. It splits the WAN latent spatially, decodes each tile with the temporal streaming decoder, blends tile overlaps with feather masks, accumulates the final decoded video on CPU, and offloads the VAE before video saving.
+
+Latest exact 720p/81 test result with the 5B path:
+
+- output: `renders/tiled_720p_exact_i2v_alley_1280x720_81f_8steps.mp4`
+- request: `1280x720`, `81` frames, `16` fps, `8` sample steps
+- saved video: `1280x720`, `81` frames, `5.0625` seconds
+- elapsed: `118.129` seconds
+- peak runner driver-used VRAM: `21.488` GB
+- peak Windows dedicated GPU memory: `21.925` GB
+- peak Windows shared GPU memory: `0.154` GB
+- VAE decode began and ended around `3.646` GB driver-used VRAM
+- VAE tiling: `8` spatial tiles for the generated latent
+
+A second exact-size 720p/81 start-frame run used `inputs/start_frames_1280x720/woman_black_sand_beach.png` and completed with the same tiled path:
+
+- output: `renders/tiled_720p_exact_i2v_woman_1280x720_81f_8steps.mp4`
+- saved video: `1280x720`, `81` frames, `5.0625` seconds
+- elapsed: `116.25` seconds
+- peak runner driver-used VRAM: `20.841` GB
+- peak Windows dedicated GPU memory: `21.28` GB
+- peak Windows shared GPU memory: `0.154` GB
+- VAE decode began and ended around `3.527` GB driver-used VRAM
+
+WAN I2V snaps 1280x720 to its internal spatial grid. The runner now generates at `1280x736`, resizes the start image to that grid, then center-crops the decoded result back to the requested `1280x720` before saving. This avoids the upstream floor-to-704 behavior while keeping the saved video at the requested size.
+
 ## Comfy Memory Findings
 
 The reference Comfy behavior is not a single trick. It combines runtime-wide model residency management with VAE-specific tiled decode paths.
@@ -127,7 +153,7 @@ Custom-node behavior in the reference install also matters:
 Implementation implication for this standalone renderer:
 
 - Keep the current pre-VAE full offload step.
-- Add a spatial tiled WAN VAE decode path with overlap blending and CPU accumulation.
+- Keep the spatial tiled WAN VAE decode path with overlap blending and CPU accumulation.
 - Keep Windows dedicated/shared telemetry as the guardrail; success means avoiding shared GPU spill, not merely avoiding a Python OOM.
 - Prefer an app-owned implementation of the concept. Copying Comfy core code would pull in GPLv3 obligations; WanVideoWrapper's relevant code is Apache-2.0, but a clean implementation is still easier to maintain.
 
@@ -138,7 +164,7 @@ The next backend slice is to harden the render path before enabling longer jobs:
 - stream progress and cancellation state into the local API
 - surface render lock state in the UI
 - surface staged VRAM telemetry in the UI/API render details
-- implement spatial tiled WAN VAE decode with overlap blending and CPU accumulation
+- tune tiled VAE presets for quality, speed, and A14B profiles
 - install or build a proper compiled attention kernel for the production runtime
 - then implement A14B FP8 linear support and high/low expert loading
 - apply profile LoRAs to the correct high/low expert only

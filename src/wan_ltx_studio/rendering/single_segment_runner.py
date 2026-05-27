@@ -49,6 +49,10 @@ def main() -> None:
         dry_run=args.dry_run,
         allow_gpu=args.allow_gpu,
         lock_path=args.lock_path,
+        vae_tile_height=args.vae_tile_height,
+        vae_tile_width=args.vae_tile_width,
+        vae_stride_height=args.vae_stride_height,
+        vae_stride_width=args.vae_stride_width,
     )
     payload = run_segment(config)
     print(json.dumps(payload, indent=2))
@@ -213,13 +217,26 @@ def _run_ti2v_5b_segment_inner(
     telemetry.mark("text_encoder_loaded_cpu")
     pipeline.vae = _load_wan22_vae(Wan2_2_VAE, components["vae"], pipeline.device)
     telemetry.mark("vae_loaded_cuda")
-    _install_streaming_vae_decode(pipeline.vae, pipeline, telemetry, torch)
-    telemetry.mark("vae_streaming_temporal_decode_installed")
+    _install_streaming_vae_decode(pipeline.vae, pipeline, telemetry, torch, config)
+    telemetry.mark("vae_streaming_tiled_decode_installed")
     pipeline.model = _load_ti2v_model(WanModel, cfg, components["dit"])
     telemetry.mark("dit_loaded_cpu")
     _install_component_memory_hooks(pipeline, telemetry, expected_dit_forwards=config.sample_steps * 2)
 
+    generation_width, generation_height = _generation_size_for_request(config, pipeline)
     img = Image.open(config.start_image).convert("RGB") if config.start_image else None
+    if img is not None and (generation_width, generation_height) != (config.width, config.height):
+        resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+        img = img.resize((generation_width, generation_height), resample)
+        telemetry.mark(
+            "start_image_resized_for_generation_grid",
+            {
+                "requestedWidth": config.width,
+                "requestedHeight": config.height,
+                "generationWidth": generation_width,
+                "generationHeight": generation_height,
+            },
+        )
     telemetry.mark(
         "start_image_loaded_cpu" if img is not None else "no_start_image",
         {"startImage": config.start_image},
@@ -228,8 +245,8 @@ def _run_ti2v_5b_segment_inner(
     video = pipeline.generate(
         config.prompt,
         img=img,
-        size=(config.width, config.height),
-        max_area=config.width * config.height,
+        size=(generation_width, generation_height),
+        max_area=generation_width * generation_height,
         frame_num=config.frame_num,
         shift=config.sample_shift,
         sample_solver="unipc",
@@ -239,6 +256,9 @@ def _run_ti2v_5b_segment_inner(
         seed=-1 if config.seed is None else config.seed,
         offload_model=config.offload_model,
     )
+    video, crop_detail = _crop_or_resize_video_to_request(video, config.height, config.width, torch)
+    if crop_detail is not None:
+        telemetry.mark("video_matched_requested_size", crop_detail, synchronize=True)
     telemetry.mark("after_generate", synchronize=True)
     _offload_vae_after_decode(pipeline.vae, telemetry, torch)
 
@@ -486,7 +506,13 @@ def _is_float(value: str) -> bool:
         return False
 
 
-def _install_streaming_vae_decode(vae, pipeline, telemetry: _CudaMemoryTelemetry, torch_module) -> None:
+def _install_streaming_vae_decode(
+    vae,
+    pipeline,
+    telemetry: _CudaMemoryTelemetry,
+    torch_module,
+    config: SegmentRunnerConfig,
+) -> None:
     import types
     import wan.modules.vae2_2 as vae2_2
 
@@ -496,13 +522,15 @@ def _install_streaming_vae_decode(vae, pipeline, telemetry: _CudaMemoryTelemetry
         _offload_non_vae_components_before_decode(pipeline, telemetry, torch_module)
         with _vae_autocast_context(torch_module, self):
             return [
-                _decode_wan22_vae_temporal_stream(
+                _decode_wan22_vae_tiled_stream(
                     self,
                     latent,
                     unpatchify_fn=vae2_2.unpatchify,
                     telemetry=telemetry,
                     torch_module=torch_module,
                     video_index=video_index,
+                    tile_size=(config.vae_tile_height, config.vae_tile_width),
+                    tile_stride=(config.vae_stride_height, config.vae_stride_width),
                 )
                 for video_index, latent in enumerate(zs)
             ]
@@ -540,7 +568,265 @@ def _vae_autocast_context(torch_module, vae):
     device_type = getattr(device, "type", str(device))
     if device_type != "cuda":
         return nullcontext()
+    if hasattr(torch_module, "amp") and hasattr(torch_module.amp, "autocast"):
+        return torch_module.amp.autocast("cuda", dtype=vae.dtype)
     return torch_module.cuda.amp.autocast(dtype=vae.dtype)
+
+
+def _generation_size_for_request(config: SegmentRunnerConfig, pipeline) -> tuple[int, int]:
+    height_quantum = _spatial_generation_quantum(pipeline, axis=1)
+    width_quantum = _spatial_generation_quantum(pipeline, axis=2)
+    return _ceil_to_multiple(config.width, width_quantum), _ceil_to_multiple(config.height, height_quantum)
+
+
+def _spatial_generation_quantum(pipeline, *, axis: int) -> int:
+    patch_size = getattr(pipeline, "patch_size", (1, 1, 1))
+    vae_stride = getattr(pipeline, "vae_stride", (1, 16, 16))
+    return max(1, int(patch_size[axis]) * int(vae_stride[axis]))
+
+
+def _ceil_to_multiple(value: int, multiple: int) -> int:
+    return ((int(value) + int(multiple) - 1) // int(multiple)) * int(multiple)
+
+
+def _crop_or_resize_video_to_request(video, target_height: int, target_width: int, torch_module):
+    current_height = int(video.shape[-2])
+    current_width = int(video.shape[-1])
+    if (current_height, current_width) == (target_height, target_width):
+        return video, None
+
+    detail = {
+        "sourceWidth": current_width,
+        "sourceHeight": current_height,
+        "targetWidth": target_width,
+        "targetHeight": target_height,
+    }
+    if current_height >= target_height and current_width >= target_width:
+        top = (current_height - target_height) // 2
+        left = (current_width - target_width) // 2
+        detail.update({"mode": "center_crop", "cropTop": top, "cropLeft": left})
+        return video[..., top : top + target_height, left : left + target_width].contiguous(), detail
+
+    frames = video.permute(1, 0, 2, 3)
+    resized = torch_module.nn.functional.interpolate(
+        frames,
+        size=(target_height, target_width),
+        mode="bilinear",
+        align_corners=False,
+    )
+    detail["mode"] = "resize"
+    return resized.permute(1, 0, 2, 3).contiguous(), detail
+
+
+def _decode_wan22_vae_tiled_stream(
+    vae,
+    latent,
+    *,
+    unpatchify_fn,
+    telemetry: _CudaMemoryTelemetry | None,
+    torch_module,
+    video_index: int = 0,
+    tile_size: tuple[int, int] = (34, 34),
+    tile_stride: tuple[int, int] = (18, 16),
+    spatial_upsample: int = 16,
+):
+    latent_height = int(latent.shape[-2])
+    latent_width = int(latent.shape[-1])
+    tile_height = max(1, min(int(tile_size[0]), latent_height))
+    tile_width = max(1, min(int(tile_size[1]), latent_width))
+    stride_height = max(1, min(int(tile_stride[0]), tile_height))
+    stride_width = max(1, min(int(tile_stride[1]), tile_width))
+    tasks = _spatial_tile_tasks(latent_height, latent_width, tile_height, tile_width, stride_height, stride_width)
+
+    if len(tasks) == 1:
+        return _decode_wan22_vae_temporal_stream(
+            vae,
+            latent,
+            unpatchify_fn=unpatchify_fn,
+            telemetry=telemetry,
+            torch_module=torch_module,
+            video_index=video_index,
+        )
+
+    latent_is_cuda = getattr(latent, "is_cuda", False)
+    if telemetry:
+        telemetry.mark(
+            "vae_tiled_decode_start",
+            {
+                "videoIndex": video_index,
+                "latentHeight": latent_height,
+                "latentWidth": latent_width,
+                "tileHeight": tile_height,
+                "tileWidth": tile_width,
+                "strideHeight": stride_height,
+                "strideWidth": stride_width,
+                "tiles": len(tasks),
+            },
+            synchronize=latent_is_cuda,
+        )
+
+    values = None
+    weights = None
+    overlap_height = max(0, (tile_height - stride_height) * spatial_upsample)
+    overlap_width = max(0, (tile_width - stride_width) * spatial_upsample)
+
+    for tile_index, (top, bottom, left, right) in enumerate(tasks):
+        if telemetry:
+            telemetry.mark(
+                "vae_tiled_decode_tile_start",
+                {
+                    "videoIndex": video_index,
+                    "tile": tile_index + 1,
+                    "tiles": len(tasks),
+                    "latentTop": top,
+                    "latentBottom": bottom,
+                    "latentLeft": left,
+                    "latentRight": right,
+                },
+                synchronize=latent_is_cuda,
+            )
+
+        latent_tile = latent[:, :, top:bottom, left:right].contiguous()
+        decoded_tile = _decode_wan22_vae_temporal_stream(
+            vae,
+            latent_tile,
+            unpatchify_fn=unpatchify_fn,
+            telemetry=None,
+            torch_module=torch_module,
+            video_index=video_index,
+        )
+
+        if values is None:
+            output_height = latent_height * spatial_upsample
+            output_width = latent_width * spatial_upsample
+            values = torch_module.zeros(
+                (decoded_tile.shape[0], decoded_tile.shape[1], output_height, output_width),
+                dtype=decoded_tile.dtype,
+                device="cpu",
+            )
+            weights = torch_module.zeros(
+                (1, 1, output_height, output_width),
+                dtype=decoded_tile.dtype,
+                device="cpu",
+            )
+
+        target_top = top * spatial_upsample
+        target_left = left * spatial_upsample
+        tile_output_height = min(int(decoded_tile.shape[-2]), int(values.shape[-2]) - target_top)
+        tile_output_width = min(int(decoded_tile.shape[-1]), int(values.shape[-1]) - target_left)
+        decoded_tile = decoded_tile[:, :, :tile_output_height, :tile_output_width]
+
+        mask = _spatial_feather_mask(
+            torch_module,
+            height=tile_output_height,
+            width=tile_output_width,
+            top_bound=top == 0,
+            bottom_bound=bottom >= latent_height,
+            left_bound=left == 0,
+            right_bound=right >= latent_width,
+            overlap_height=overlap_height,
+            overlap_width=overlap_width,
+            dtype=decoded_tile.dtype,
+        )
+
+        target_bottom = target_top + tile_output_height
+        target_right = target_left + tile_output_width
+        values[:, :, target_top:target_bottom, target_left:target_right].add_(decoded_tile * mask)
+        weights[:, :, target_top:target_bottom, target_left:target_right].add_(mask)
+
+        del latent_tile, decoded_tile, mask
+        _empty_cuda_cache_for_tensor(torch_module, latent)
+
+        if telemetry and _should_mark_vae_tile(tile_index + 1, len(tasks)):
+            telemetry.mark(
+                "vae_tiled_decode_tile_cpu",
+                {
+                    "videoIndex": video_index,
+                    "tile": tile_index + 1,
+                    "tiles": len(tasks),
+                },
+                synchronize=latent_is_cuda,
+            )
+
+    if values is None or weights is None:
+        raise SegmentRunnerError("VAE tiled decode produced no tiles")
+
+    output = values / weights.clamp_min(1e-6)
+    output.clamp_(-1, 1)
+    if telemetry:
+        telemetry.mark("vae_tiled_decode_end", {"videoIndex": video_index, "tiles": len(tasks)}, synchronize=latent_is_cuda)
+    return output
+
+
+def _spatial_tile_tasks(
+    latent_height: int,
+    latent_width: int,
+    tile_height: int,
+    tile_width: int,
+    stride_height: int,
+    stride_width: int,
+) -> list[tuple[int, int, int, int]]:
+    tasks = []
+    for top in range(0, latent_height, stride_height):
+        if top - stride_height >= 0 and top - stride_height + tile_height >= latent_height:
+            continue
+        for left in range(0, latent_width, stride_width):
+            if left - stride_width >= 0 and left - stride_width + tile_width >= latent_width:
+                continue
+            tasks.append(
+                (
+                    top,
+                    min(top + tile_height, latent_height),
+                    left,
+                    min(left + tile_width, latent_width),
+                )
+            )
+    return tasks
+
+
+def _spatial_feather_mask(
+    torch_module,
+    *,
+    height: int,
+    width: int,
+    top_bound: bool,
+    bottom_bound: bool,
+    left_bound: bool,
+    right_bound: bool,
+    overlap_height: int,
+    overlap_width: int,
+    dtype,
+):
+    h = _feather_axis_mask(
+        torch_module,
+        height,
+        leading_bound=top_bound,
+        trailing_bound=bottom_bound,
+        overlap=overlap_height,
+        dtype=dtype,
+    )
+    w = _feather_axis_mask(
+        torch_module,
+        width,
+        leading_bound=left_bound,
+        trailing_bound=right_bound,
+        overlap=overlap_width,
+        dtype=dtype,
+    )
+    return torch_module.minimum(h.view(1, 1, height, 1), w.view(1, 1, 1, width))
+
+
+def _feather_axis_mask(torch_module, length: int, *, leading_bound: bool, trailing_bound: bool, overlap: int, dtype):
+    mask = torch_module.ones((length,), dtype=dtype, device="cpu")
+    overlap = max(0, min(int(overlap), length))
+    if overlap == 0:
+        return mask
+    ramp = torch_module.arange(1, overlap + 1, dtype=dtype, device="cpu") / overlap
+    if not leading_bound:
+        mask[:overlap] = torch_module.minimum(mask[:overlap], ramp)
+    if not trailing_bound:
+        mask[-overlap:] = torch_module.minimum(mask[-overlap:], torch_module.flip(ramp, dims=(0,)))
+    return mask
 
 
 def _decode_wan22_vae_temporal_stream(
@@ -619,6 +905,10 @@ def _empty_cuda_cache_for_tensor(torch_module, tensor) -> None:
 
 def _should_mark_vae_chunk(chunk_number: int, total_chunks: int) -> bool:
     return chunk_number <= 2 or chunk_number == total_chunks or chunk_number % 4 == 0
+
+
+def _should_mark_vae_tile(tile_number: int, total_tiles: int) -> bool:
+    return tile_number <= 2 or tile_number == total_tiles or tile_number % 4 == 0
 
 
 def _runner_warnings(config: SegmentRunnerConfig) -> list[str]:
@@ -982,6 +1272,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--allow-gpu", action="store_true")
     parser.add_argument("--lock-path", default="renders/.render.lock")
+    parser.add_argument("--vae-tile-height", type=int, default=34)
+    parser.add_argument("--vae-tile-width", type=int, default=34)
+    parser.add_argument("--vae-stride-height", type=int, default=18)
+    parser.add_argument("--vae-stride-width", type=int, default=16)
     return parser.parse_args()
 
 

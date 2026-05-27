@@ -62,3 +62,19 @@ The standalone renderer should reproduce the memory behavior with app-owned code
 - Treat Windows shared GPU memory usage as an unsafe spill condition, even if CUDA does not throw an OOM.
 
 The acceptance target for the first serious 720p direct A14B I2V renderer is not "fits in 32 GB"; it is "stays around the proven 25 GB profile."
+
+## Current Direct 5B Calibration
+
+Date: 2026-05-27
+
+The first exact-size 720p/81 direct renders now complete on the app-owned 5B path:
+
+- Profile: `wan22_ti2v_5b_fp16`.
+- Request: `1280 x 720`, `81` frames, `16` fps, `8` sample steps.
+- Output: exact `1280 x 720`, `81` frames, `5.0625` seconds.
+- Peak runner driver-used VRAM: `20.841` to `21.488` GB.
+- Peak Windows dedicated GPU memory: `21.28` to `21.925` GB.
+- Peak Windows shared GPU memory: `0.154` GB.
+- VAE path: pre-decode DiT/text-encoder offload, spatial tiled decode, temporal streaming per tile, overlap blending, CPU accumulation.
+
+This validates the first memory-management shape for the standalone renderer. The next VRAM acceptance check is the same behavior on the A14B high/low expert path.

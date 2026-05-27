@@ -43,10 +43,12 @@ Completed calibration work:
 - 81-frame 1280x720 sampling reached the end of diffusion at about 24 GB dedicated VRAM.
 - Pre-VAE offload now moves the DiT and text encoder to CPU before decode.
 - Temporal VAE streaming was implemented and measured.
+- Spatial tiled WAN VAE decode with overlap blending and CPU accumulation was implemented.
+- Two 81-frame 1280x720 I2V calibration renders now complete with exact 1280x720 saved frames.
 
 Latest 720p finding:
 
-Sampling fits the RTX 5090 target, but 81-frame 720p VAE decode still needs spatial tiling. The next renderer milestone is a WAN VAE tiled decode path with overlap blending and CPU accumulation, using shared GPU memory as a hard warning signal.
+The direct 5B runner completed exact 81-frame 1280x720 I2V calibration renders with tiled VAE decode on both environment and portrait start frames. The runs generate on the WAN spatial grid, center-crop back to 1280x720, and stayed around 21.3 to 21.9 GB Windows dedicated GPU memory with about 0.15 GB shared GPU memory. Shared GPU memory remains a hard warning signal for future A14B work.
 
 ## Target Workflow
 
@@ -66,7 +68,6 @@ The first serious production target is based on the user's proven WAN 2.2 I2V wo
 
 The main items still ahead:
 
-- Spatial tiled WAN VAE decode for 720p/81.
 - API progress stream and cancellation state.
 - Render details in the UI, including telemetry and output metadata.
 - A14B FP8 scaled weight support.
